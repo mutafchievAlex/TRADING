@@ -222,44 +222,6 @@ class StateManager:
         """Get all open positions."""
         return self.open_positions.copy()
     
-    def update_position_tp_levels(self, ticket: int, tp1_price: Optional[float] = None,
-                                   tp2_price: Optional[float] = None, 
-                                   tp3_price: Optional[float] = None) -> bool:
-        """
-        Update TP price levels for a position.
-        
-        Args:
-            ticket: Position ticket number
-            tp1_price: TP1 price level
-            tp2_price: TP2 price level
-            tp3_price: TP3 price level
-            
-        Returns:
-            True if updated, False if position not found
-        """
-        try:
-            for position in self.open_positions:
-                if position['ticket'] == ticket:
-                    if tp1_price is not None:
-                        position['tp1_price'] = tp1_price
-                    if tp2_price is not None:
-                        position['tp2_price'] = tp2_price
-                    if tp3_price is not None:
-                        position['tp3_price'] = tp3_price
-                    
-                    self.logger.info(f"Ticket {ticket}: TP levels updated - TP1={tp1_price:.2f if tp1_price else 'N/A'}, "
-                                   f"TP2={tp2_price:.2f if tp2_price else 'N/A'}, TP3={tp3_price:.2f if tp3_price else 'N/A'}")
-                    
-                    self.save_state()
-                    return True
-            
-            self.logger.warning(f"Position ticket {ticket} not found for TP levels update")
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Error updating TP levels: {e}")
-            return False
-    
     def update_position_tp_state(self, ticket: int, new_tp_state: str, 
                                  new_stop_loss: Optional[float] = None,
                                  transition_time: Optional[datetime] = None,

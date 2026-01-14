@@ -514,9 +514,6 @@ class MainWindow(QMainWindow):
         self.progress_tp2 = QLabel("TP2 Progress: 0%")
         self.progress_tp2.setStyleSheet("font-size: 9px; padding: 2px; color: #aaa;")
         tp_layout.addWidget(self.progress_tp2)
-
-        # Attach the TP layout so TP1/TP2/TP3 fields render inside the group box
-        tp_group.setLayout(tp_layout)
         
         # Add scroll area for TP levels if needed
         tp_scroll = QScrollArea()
@@ -1556,25 +1553,14 @@ class MainWindow(QMainWindow):
                 tp1_price = position.get('tp1_price')
                 tp2_price = position.get('tp2_price')
                 tp3_price = position.get('tp3_price')
-                
-                # Log position data to track missing TP levels
-                self.logger.info(f"[UI] Position {position.get('ticket')}: tp1={tp1_price}, tp2={tp2_price}, tp3={tp3_price}, has_controller={hasattr(self, '_controller')}")
-                
                 if (tp1_price is None or tp2_price is None or tp3_price is None) and hasattr(self, '_controller') and self._controller:
                     try:
                         direction = position.get('direction', 1)
-                        stop_loss = position.get('stop_loss', entry_price)
-                        
-                        self.logger.info(f"[UI] Computing TP levels for position {position.get('ticket')}: entry={entry_price:.2f}, sl={stop_loss:.2f}, direction={direction}")
-                        
                         calc = self._controller.strategy_engine.multi_level_tp.calculate_tp_levels(
                             entry_price=entry_price,
-                            stop_loss=stop_loss,
+                            stop_loss=position.get('stop_loss', entry_price),
                             direction=direction
                         )
-                        
-                        self.logger.info(f"[UI] Calculated TP levels: {calc}")
-                        
                         if calc:
                             if tp1_price is None:
                                 tp1_price = calc.get('tp1')
@@ -1585,16 +1571,8 @@ class MainWindow(QMainWindow):
                             if tp3_price is None:
                                 tp3_price = calc.get('tp3')
                                 position['tp3_price'] = tp3_price
-                            # Persist to state manager
-                            self._controller.state_manager.update_position_tp_levels(
-                                ticket=position.get('ticket'),
-                                tp1_price=tp1_price,
-                                tp2_price=tp2_price,
-                                tp3_price=tp3_price
-                            )
-                            self.logger.info(f"[UI] Computed and saved TP levels for position {position.get('ticket')}: TP1={tp1_price:.2f}, TP2={tp2_price:.2f}, TP3={tp3_price:.2f}")
                     except Exception as ex:
-                        self.logger.error(f"[UI] Error calculating TP levels for display: {ex}", exc_info=True)
+                        self.logger.error(f"Error calculating TP levels for display: {ex}")
                 
                 # Stop Loss (use dynamic current_stop_loss if present)
                 sl = position.get('current_stop_loss', position.get('stop_loss', 0))
