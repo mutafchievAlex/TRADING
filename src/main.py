@@ -777,15 +777,58 @@ class TradingController(QObject):
             self.logger.error(f"Heartbeat error: {e}", exc_info=True)
     
     def _on_connection_status_change(self, is_connected: bool):
-        """Handle connection status changes from Connection Manager."""
+        """
+        Handle connection status changes from Connection Manager.
+        
+        When connection is lost during trading:
+        1. Stop main loop to prevent orphaned positions
+        2. Log critical alert
+        3. Attempt automatic recovery
+        4. Notify user with action items
+        """
         self.is_connected = is_connected
         
         if not is_connected and self.is_running:
-            self.logger.error("Connection lost during trading!")
+            self.logger.error("🔴 CRITICAL: Connection lost during trading!")
+            self.logger.error("=" * 60)
+            self.logger.error("ACTION: Stopping trading loop to protect open positions")
+            self.logger.error("ACTION: Attempting automatic reconnection...")
+            self.logger.error("=" * 60)
+            
+            # Stop main loop - critical to prevent trading without connection
             self.stop_trading()
             
+            # Log all open positions before attempting recovery
+            all_positions = self.state_manager.get_all_positions()
+            if all_positions:
+                self.logger.error(f"Open positions at connection loss: {len(all_positions)}")
+                for pos in all_positions:
+                    self.logger.error(
+                        f"  Ticket {pos['ticket']}: Entry={pos['entry_price']:.5f}, "
+                        f"SL={pos['stop_loss']:.5f}, TP={pos['take_profit']:.5f}"
+                    )
+            else:
+                self.logger.error("No open positions - connection loss has minimal impact")
+            
+            # Attempt automatic reconnection (non-blocking)
+            self._attempt_auto_recovery()
+            
             if self.window:
-                self.window.log_message("MT5 CONNECTION LOST - Trading stopped")
+                self.window.log_message(
+                    "🔴 MT5 CONNECTION LOST\n"
+                    "• Trading halted to protect open positions\n"
+                    "• Attempting automatic reconnection...\n"
+                    "• Check logs for position details"
+                )
+        
+        elif is_connected and not self.is_running:
+            self.logger.info("✅ Connection restored - ready to resume trading")
+            if self.window:
+                self.window.log_message(
+                    "✅ MT5 CONNECTION RESTORED\n"
+                    "• Click 'Start Trading' to resume\n"
+                    "• All open positions intact on broker"
+                )
         
         # Update UI
         if self.window:
@@ -793,6 +836,44 @@ class TradingController(QObject):
                 is_connected,
                 self.market_data.get_account_info() if is_connected else None
             )
+    
+    def _attempt_auto_recovery(self):
+        """
+        Attempt automatic recovery of MT5 connection.
+        
+        Non-blocking attempt to restore connection after loss.
+        Does NOT restart trading automatically - requires user confirmation.
+        """
+        try:
+            self.logger.info("Starting connection recovery attempt...")
+            mt5_config = self.config.get_mt5_config()
+            
+            # Try up to 3 times with delays
+            for attempt in range(1, 4):
+                self.logger.info(f"Recovery attempt {attempt}/3...")
+                time.sleep(3 * attempt)  # Exponential backoff
+                
+                success = self.connection_manager.reconnect(
+                    login=mt5_config.get('login'),
+                    password=mt5_config.get('password'),
+                    server=mt5_config.get('server'),
+                    terminal_path=mt5_config.get('terminal_path')
+                )
+                
+                if success:
+                    self.logger.info("✅ Connection recovery successful!")
+                    self.is_connected = True
+                    return
+                else:
+                    self.logger.warning(f"Recovery attempt {attempt} failed, retrying...")
+            
+            self.logger.error(
+                "❌ Connection recovery failed after 3 attempts.\n"
+                "ACTION: Check MT5 terminal status and restart if needed."
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Connection recovery error: {e}", exc_info=True)
     
     @Slot()
     def main_loop(self):

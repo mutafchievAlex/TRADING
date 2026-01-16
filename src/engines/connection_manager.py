@@ -122,8 +122,8 @@ class MT5ConnectionManager:
             # Try to shutdown gracefully
             try:
                 mt5.shutdown()
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"MT5 shutdown had issues (expected if not connected): {e}")
             
             # Wait a bit before reinitializing
             time.sleep(2)
@@ -224,7 +224,8 @@ class MT5ConnectionManager:
 
 if __name__ == "__main__":
     # Simple test
-    logging.basicConfig(level=logging.DEBUG)
+    # Note: Do not use basicConfig here - logging is configured by the application
+    # logger = logging.getLogger(__name__)
     
     manager = MT5ConnectionManager(heartbeat_interval_seconds=5, max_heartbeat_failures=2)
     manager.set_connection_status(True)

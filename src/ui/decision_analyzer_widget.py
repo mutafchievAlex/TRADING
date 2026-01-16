@@ -435,7 +435,8 @@ class DecisionAnalyzerWidget(QWidget):
         
         try:
             bar_index = int(bar_index_item.text())
-        except:
+        except (ValueError, AttributeError, TypeError):
+            # Invalid bar index input, silently return
             return
         
         # Find decision

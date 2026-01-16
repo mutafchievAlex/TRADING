@@ -14,6 +14,62 @@ Entry conditions (ALL must be true):
 Exit conditions:
 - Stop Loss hit (ATR-based or swing-based)
 - Take Profit hit (Risk × RR)
+
+═══════════════════════════════════════════════════════════════════════════════
+MULTI-LEVEL TP STATE MACHINE
+═══════════════════════════════════════════════════════════════════════════════
+
+Position Life Cycle:
+
+    ┌──────────────┐
+    │   IN_TRADE   │  ← Position opened, no TP reached yet
+    └──────┬───────┘
+           │ Price reaches TP1 (1.4x RR)
+           │ • SL tightened to breakeven
+           │ • Partial position closed (optional)
+           │ • Counters reset
+           │
+    ┌──────▼─────────────┐
+    │  TP1_REACHED      │  ← TP1 level touched, waiting for TP2
+    │  (TOUCHED state)   │  • SL follows via trailing mechanism
+    │                    │  • bars_held_after_tp1 incremented each bar
+    └──────┬─────────────┘
+           │ Price reaches TP2 (1.9x RR)
+           │ • SL moves to TP1 (lock in profit)
+           │ • Second partial close (optional)
+           │ • bars_held_after_tp1 ceases incrementing
+           │
+    ┌──────▼──────────────────┐
+    │  TP2_REACHED            │  ← TP2 level touched, managing to TP3
+    │  (ACTIVE_MANAGEMENT)    │  • SL follows trailing mechanism
+    │                          │  • bars_held_after_tp2 incremented each bar
+    └──────┬──────────────────┘
+           │ Price reaches TP3 (2.0x RR) OR SL hit
+           │ • Final close
+           │ • Position closed
+           │
+    ┌──────▼─────────┐
+    │    CLOSED       │  ← Position fully closed
+    │  (COMPLETED)    │  • All counters persist for analysis
+    └────────────────┘
+
+State Transitions:
+• IN_TRADE       → TP1_REACHED:  When close >= TP1 price
+• TP1_REACHED    → TP2_REACHED:  When close >= TP2 price
+• TP2_REACHED    → CLOSED:       When close >= TP3 OR SL hit
+• Any state      → CLOSED:       Manual exit or externally closed position
+
+Counter Tracking:
+• bars_held_after_tp1: Incremented while TP1_REACHED (becomes 0 on TP2_REACHED)
+• bars_held_after_tp2: Incremented while TP2_REACHED (becomes 0 on CLOSED)
+• Persisted to state.json for post-trade analysis
+
+SL Management Strategy:
+• Entry to TP1:  SL = Entry - (2.0 × ATR14)
+• TP1 reached:   SL = Entry (breakeven protection)
+• TP2 reached:   SL = TP1 (lock in first profit target)
+• Beyond TP2:    SL = Price - Trailing Offset (0.5 pips)
+
 """
 
 import pandas as pd

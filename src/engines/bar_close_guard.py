@@ -361,7 +361,8 @@ class BarCloseGuard:
 
 if __name__ == "__main__":
     # Simple test
-    logging.basicConfig(level=logging.DEBUG)
+    # Note: Do not use basicConfig here - logging is configured by the application
+    # logger = logging.getLogger(__name__)
     
     guard = BarCloseGuard(min_pips_movement=5.0, anti_fomo_bars=1)
     

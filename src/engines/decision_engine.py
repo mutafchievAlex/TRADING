@@ -187,7 +187,8 @@ class DecisionEngine:
                 bar_timestamp = df.index[bar_idx].strftime('%Y-%m-%d %H:%M')
             else:
                 bar_timestamp = str(df.index[bar_idx])
-        except:
+        except (ValueError, IndexError, AttributeError) as e:
+            self.logger.warning(f"Failed to format bar timestamp: {e}")
             bar_timestamp = "unknown"
         
         # Extract indicators (handle both dict and Series)
