@@ -457,10 +457,12 @@ from engines.state_manager import StateManager
 from engines.connection_manager import MT5ConnectionManager
 from engines.recovery_engine import RecoveryEngine
 from engines.backtest_engine import BacktestEngine
+from engines.backtest_report_exporter import BacktestReportExporter
 from engines.market_regime_engine import MarketRegimeEngine
 from utils.config import load_config
 from utils.logger import setup_logging
 from utils.runtime_mode_manager import RuntimeModeManager, get_runtime_manager
+from utils.ui_update_queue import UIUpdateQueue, UIEventType
 from ui.main_window import MainWindow
 from ui.backtest_window import BacktestWorker
 
@@ -539,6 +541,11 @@ class TradingController(QObject):
         self.heartbeat_timer = QTimer()
         self.heartbeat_timer.timeout.connect(self._perform_heartbeat)
         self.heartbeat_interval = 15 * 1000  # 15 seconds
+        
+        # UI Update Queue (thread-safe UI updates)
+        self.ui_queue = UIUpdateQueue(max_queue_size=1000, process_interval_ms=100)
+        self.ui_queue.events_available.connect(self._process_ui_events)
+        self.logger.info("Thread-safe UI update queue initialized")
     
     def _initialize_engines(self):
         """Initialize all trading engines."""
@@ -585,9 +592,14 @@ class TradingController(QObject):
                 magic_number=mt5_config.get('magic_number', 234000)
             )
             
-            # State manager
+            # State manager (with atomic writes for thread-safe persistence)
             state_file = self.config.get('data.state_file', 'data/state.json')
-            self.state_manager = StateManager(state_file=state_file)
+            backup_dir = self.config.get('data.backup_dir', 'data/backups')
+            self.state_manager = StateManager(
+                state_file=state_file,
+                backup_dir=backup_dir,
+                use_atomic_writes=True  # Enable thread-safe atomic writes
+            )
 
             # Sync persisted cooldown so restarts do not reset it
             if self.state_manager.last_trade_time:
@@ -658,10 +670,10 @@ class TradingController(QObject):
                     if 'demo' not in server:
                         self.logger.error("LIVE TRADING MODE - REAL MONEY AT RISK")
                 
-                # Update UI if available
+                # Update UI if available (thread-safe)
                 if self.window:
-                    self.window.update_connection_status(True, account_info)
-                    self.window.update_runtime_mode_display(self.runtime_manager)
+                    self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {'connected': True, 'account_info': account_info})
+                    self.ui_queue.post_event(UIEventType.UPDATE_RUNTIME_MODE_DISPLAY, {'runtime_manager': self.runtime_manager})
                     
                     # Update runtime context
                     # Auto trading requires BOTH: checkbox enabled AND runtime policy allows it
@@ -675,7 +687,7 @@ class TradingController(QObject):
                         'mt5_connection_status': 'CONNECTED',
                         'last_heartbeat': datetime.now().strftime('%H:%M:%S')
                     }
-                    self.window.update_runtime_context(runtime_context)
+                    self.ui_queue.post_event(UIEventType.UPDATE_RUNTIME_CONTEXT, {'context': runtime_context})
                 
                 # Perform recovery if there are open positions or after restart
                 self._perform_recovery()
@@ -697,7 +709,7 @@ class TradingController(QObject):
             self.logger.info("Disconnected from MT5")
             
             if self.window:
-                self.window.update_connection_status(False)
+                self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {'connected': False, 'account_info': None})
                 
         except Exception as e:
             self.logger.error(f"Error disconnecting from MT5: {e}")
@@ -707,7 +719,7 @@ class TradingController(QObject):
         if not self.is_connected:
             self.logger.error("Cannot start trading: Not connected to MT5")
             if self.window:
-                self.window.log_message("ERROR: Not connected to MT5")
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "ERROR: Not connected to MT5"})
                 # Reset UI state to stopped
                 self.window.is_running = False
                 self.window.btn_toggle.setText("Start Trading")
@@ -722,7 +734,7 @@ class TradingController(QObject):
         self.heartbeat_timer.start(self.heartbeat_interval)  # Start heartbeat
         
         if self.window:
-            self.window.log_message("Trading started")
+            self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "Trading started"})
     
     def stop_trading(self):
         """Stop the trading loop."""
@@ -732,7 +744,7 @@ class TradingController(QObject):
         self.logger.info("Trading stopped")
         
         if self.window:
-            self.window.log_message("Trading stopped")
+            self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "Trading stopped"})
             # Update UI to reflect stopped state
             self.window.is_running = False
             self.window.btn_toggle.setText("Start Trading")
@@ -765,13 +777,13 @@ class TradingController(QObject):
                     self.logger.error("Reconnection failed")
                     self.stop_trading()
             
-            # Update UI with connection status
+            # Update UI with connection status (thread-safe)
             if self.window:
                 status = self.connection_manager.get_status_string()
-                self.window.update_connection_status(
-                    self.connection_manager.is_connected,
-                    self.market_data.get_account_info()
-                )
+                self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {
+                    'connected': self.connection_manager.is_connected,
+                    'account_info': self.market_data.get_account_info()
+                })
         
         except Exception as e:
             self.logger.error(f"Heartbeat error: {e}", exc_info=True)
@@ -814,28 +826,28 @@ class TradingController(QObject):
             self._attempt_auto_recovery()
             
             if self.window:
-                self.window.log_message(
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message':
                     "🔴 MT5 CONNECTION LOST\n"
                     "• Trading halted to protect open positions\n"
                     "• Attempting automatic reconnection...\n"
                     "• Check logs for position details"
-                )
+                })
         
         elif is_connected and not self.is_running:
             self.logger.info("✅ Connection restored - ready to resume trading")
             if self.window:
-                self.window.log_message(
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message':
                     "✅ MT5 CONNECTION RESTORED\n"
                     "• Click 'Start Trading' to resume\n"
                     "• All open positions intact on broker"
-                )
+                })
         
-        # Update UI
+        # Update UI (thread-safe)
         if self.window:
-            self.window.update_connection_status(
-                is_connected,
-                self.market_data.get_account_info() if is_connected else None
-            )
+            self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {
+                'connected': is_connected,
+                'account_info': self.market_data.get_account_info() if is_connected else None
+            })
     
     def _attempt_auto_recovery(self):
         """
@@ -874,6 +886,86 @@ class TradingController(QObject):
             
         except Exception as e:
             self.logger.error(f"Connection recovery error: {e}", exc_info=True)
+    
+    @Slot()
+    def _process_ui_events(self):
+        """
+        Process pending UI update events from queue (main thread only).
+        
+        This method is called on the main UI thread when events are available.
+        It's safe to update UI from here.
+        """
+        if not self.window:
+            return
+        
+        try:
+            # Get all pending events
+            events = self.ui_queue.get_pending_events(max_events=50)
+            
+            if not events:
+                return
+            
+            # Process each event
+            for event in events:
+                event_type = event['type']
+                data = event['data']
+                
+                try:
+                    # Dispatch to appropriate UI update method
+                    if event_type == UIEventType.UPDATE_MARKET_DATA:
+                        self.window.update_market_data(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_PATTERN_STATUS:
+                        self.window.update_pattern_status(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_ENTRY_CONDITIONS:
+                        self.window.update_entry_conditions(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_POSITION_DISPLAY:
+                        self.window.update_position_display(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_TRADE_HISTORY:
+                        self.window.update_trade_history()
+                    
+                    elif event_type == UIEventType.UPDATE_MARKET_REGIME:
+                        self.window.update_market_regime(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_CONNECTION_STATUS:
+                        self.window.update_connection_status(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_STATISTICS:
+                        self.window.update_statistics(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_SESSIONS:
+                        self.window.update_sessions(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_RUNTIME_MODE_DISPLAY:
+                        self.window.update_runtime_mode_display(**data)
+                    
+                    elif event_type == UIEventType.UPDATE_RUNTIME_CONTEXT:
+                        self.window.update_runtime_context(data.get('context'))
+                    
+                    elif event_type == UIEventType.LOG_MESSAGE:
+                        self.window.log_message(**data)
+                    
+                    elif event_type == UIEventType.BACKTEST_PROGRESS:
+                        if hasattr(self.window, 'backtest_window'):
+                            self.window.backtest_window.update_progress(**data)
+                    
+                    elif event_type == UIEventType.BACKTEST_COMPLETED:
+                        self._on_backtest_completed(data)
+                    
+                    elif event_type == UIEventType.BACKTEST_ERROR:
+                        self._on_backtest_error(data.get('message', 'Unknown error'))
+                    
+                    else:
+                        self.logger.warning(f"Unknown UI event type: {event_type}")
+                
+                except Exception as e:
+                    self.logger.error(f"Error processing UI event {event_type}: {e}", exc_info=True)
+        
+        except Exception as e:
+            self.logger.error(f"Error in _process_ui_events: {e}", exc_info=True)
     
     @Slot()
     def main_loop(self):
@@ -941,10 +1033,10 @@ class TradingController(QObject):
                 df, pattern, current_bar_index=-2
             )
             
-            # Update UI with entry conditions
+            # Update UI with entry conditions (thread-safe)
             if self.window:
-                self.window.update_entry_conditions(entry_details)
-                self.window.update_pattern_status(pattern)
+                self.ui_queue.post_event(UIEventType.UPDATE_ENTRY_CONDITIONS, {'conditions': entry_details})
+                self.ui_queue.post_event(UIEventType.UPDATE_PATTERN_STATUS, {'pattern': pattern})
             
             # Log decision
             if not should_enter:
@@ -963,7 +1055,7 @@ class TradingController(QObject):
             if not self.config.get('mode.auto_trade', False):
                 self.logger.info("Auto-trade disabled - signal logged only")
                 if self.window:
-                    self.window.log_message("ENTRY SIGNAL - Auto-trade disabled")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "ENTRY SIGNAL - Auto-trade disabled"})
                 return
             
             # Execute trade
@@ -985,7 +1077,7 @@ class TradingController(QObject):
                 if not is_demo_account and demo_mode_enabled:
                     self.logger.warning("BLOCKED: Demo Mode is ON but account is LIVE. Disable Demo Mode to trade live.")
                     if self.window:
-                        self.window.log_message("TRADE BLOCKED: Demo Mode ON with LIVE account!")
+                        self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "TRADE BLOCKED: Demo Mode ON with LIVE account!"})
                     return
                 
                 if not is_demo_account and not demo_mode_enabled:
@@ -1090,11 +1182,11 @@ class TradingController(QObject):
                 self.logger.info(f"Trade executed successfully: Ticket {ticket}, Entry={actual_entry_price:.5f}")
                 
                 if self.window:
-                    self.window.log_message(f"TRADE OPENED: Ticket {ticket} @ {actual_entry_price:.5f}")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"TRADE OPENED: Ticket {ticket} @ {actual_entry_price:.5f}"})
                     # Update position display with all open positions
                     all_positions = self.state_manager.get_all_positions()
                     if all_positions:
-                        self.window.update_position_display(all_positions)
+                        self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': all_positions})
             else:
                 self.logger.error("Order execution failed")
                 
@@ -1198,13 +1290,13 @@ class TradingController(QObject):
                     # Use enriched position_data so TP levels (tp1/tp2/tp3) are available for exit validation
                     self._execute_exit(position_data, reason)
             
-            # Update UI with all open positions (for multi-position display)
+            # Update UI with all open positions (for multi-position display) - thread-safe
             if self.window:
                 all_open_positions = self.state_manager.get_all_positions()
                 if all_open_positions:
-                    self.window.update_position_display(all_open_positions)
+                    self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': all_open_positions})
                 else:
-                    self.window.update_position_display(None)
+                    self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': None})
 
             
         except Exception as e:
@@ -1300,13 +1392,13 @@ class TradingController(QObject):
                 self.logger.info(f"Position closed: {reason}, Profit: ${position['profit']:.2f}")
                 
                 if self.window:
-                    self.window.log_message(f"POSITION CLOSED: {reason}, P/L: ${position['profit']:.2f}")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"POSITION CLOSED: {reason}, P/L: ${position['profit']:.2f}"})
                     # Update position display with remaining positions
                     remaining_positions = self.state_manager.get_all_positions()
                     if remaining_positions:
-                        self.window.update_position_display(remaining_positions)
+                        self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': remaining_positions})
                     else:
-                        self.window.update_position_display(None)
+                        self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': None})
             else:
                 self.logger.error("Failed to close position")
                 
@@ -1314,21 +1406,33 @@ class TradingController(QObject):
             self.logger.error(f"Error executing exit: {e}", exc_info=True)
     
     def _update_ui(self, current_bar, indicators, pattern):
-        """Update UI with current data."""
+        """
+        Update UI with current data (thread-safe version).
+        
+        All UI updates go through the thread-safe queue to prevent
+        race conditions when backtest is running simultaneously.
+        """
         if not self.window:
             return
         
         try:
-            # Update market data with live tick price
+            # Get live price
             live_price = self.market_data.get_current_tick()
             display_price = live_price if live_price is not None else current_bar['close']
-            self.window.update_market_data(display_price, indicators)
             
-            # Update pattern status
-            self.window.update_pattern_status(pattern)
+            # Post market data update to queue (thread-safe)
+            self.ui_queue.post_event(UIEventType.UPDATE_MARKET_DATA, {
+                'price': display_price,
+                'indicators': indicators
+            })
             
-            # Update trade history
-            self.window.update_trade_history()
+            # Post pattern status update
+            self.ui_queue.post_event(UIEventType.UPDATE_PATTERN_STATUS, {
+                'pattern': pattern
+            })
+            
+            # Post trade history update
+            self.ui_queue.post_event(UIEventType.UPDATE_TRADE_HISTORY, {})
 
             # Update market regime (context only, bar-close values)
             if indicators and 'ema50' in indicators and 'ema200' in indicators:
@@ -1338,30 +1442,37 @@ class TradingController(QObject):
                     ema200=indicators.get('ema200')
                 )
                 regime_state = self.market_regime_engine.get_state()
-                self.window.update_market_regime(regime_state)
+                
+                # Post regime update to queue
+                self.ui_queue.post_event(UIEventType.UPDATE_MARKET_REGIME, {
+                    'regime_state': regime_state
+                })
+                
                 # Persist regime state for restart continuity
                 self.state_manager.set_regime_state(regime_state)
             
             # Note: Position Preview, Quality Score, Guard Status panels are disabled
             # Uncomment when implemented:
-            # self.window.update_position_preview(None)
-            # self.window.update_quality_score(None)
-            # self.window.update_guard_status(None)
+            # self.ui_queue.post_event(UIEventType.UPDATE_POSITION_PREVIEW, {'data': None})
+            # self.ui_queue.post_event(UIEventType.UPDATE_QUALITY_SCORE, {'data': None})
+            # self.ui_queue.post_event(UIEventType.UPDATE_GUARD_STATUS, {'data': None})
             
-            # Update statistics
+            # Post statistics update
             stats = self.state_manager.get_statistics()
-            self.window.update_statistics(stats)
+            self.ui_queue.post_event(UIEventType.UPDATE_STATISTICS, {
+                'stats': stats
+            })
             
-            # Update account info
+            # Update account info (thread-safe)
             account_info = self.market_data.get_account_info()
             if account_info:
-                self.window.update_connection_status(True, account_info)
+                self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {'connected': True, 'account_info': account_info})
             
-            # Update trading sessions
+            # Update trading sessions (thread-safe)
             sessions = self.market_data.get_active_sessions()
-            self.window.update_sessions(sessions)
+            self.ui_queue.post_event(UIEventType.UPDATE_SESSIONS, {'sessions': sessions})
             
-            # Update runtime context
+            # Update runtime context (thread-safe)
             # Auto trading requires BOTH: checkbox enabled AND runtime policy allows it
             can_auto_trade_by_policy, policy_reason = self.runtime_manager.can_auto_trade()
             auto_trading_active = self.auto_trade_enabled and can_auto_trade_by_policy
@@ -1373,7 +1484,7 @@ class TradingController(QObject):
                 'mt5_connection_status': 'CONNECTED' if self.is_connected else 'DISCONNECTED',
                 'last_heartbeat': datetime.now().strftime('%H:%M:%S')
             }
-            self.window.update_runtime_context(runtime_context)
+            self.ui_queue.post_event(UIEventType.UPDATE_RUNTIME_CONTEXT, {'context': runtime_context})
             
         except Exception as e:
             self.logger.error(f"Error updating UI: {e}")
@@ -1417,14 +1528,14 @@ class TradingController(QObject):
                     )
                 
                 if self.window:
-                    self.window.log_message(
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message':
                         f"Recovery: {recovery_result['positions_validated']} positions validated, "
                         f"{recovery_result['positions_closed']} closed"
-                    )
+                    })
             else:
                 self.logger.error(f"Recovery failed: {recovery_result['recovery_reason']}")
                 if self.window:
-                    self.window.log_message(f"Recovery failed: {recovery_result['recovery_reason']}")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"Recovery failed: {recovery_result['recovery_reason']}"})
         
         except Exception as e:
             self.logger.error(f"Error during recovery: {e}", exc_info=True)
@@ -1517,16 +1628,133 @@ class TradingController(QObject):
         self.logger.error(f"Backtest error: {message}")
 
     def _on_export_json_requested(self):
-        if self.window and getattr(self.window, "backtest_window", None):
-            self.window.backtest_window.set_status("Export JSON not implemented")
+        """Export backtest results as JSON."""
+        try:
+            if not self.window or not getattr(self.window, "backtest_window", None):
+                return
+            
+            bt_ui = self.window.backtest_window
+            
+            # Get backtest data from UI
+            if not hasattr(bt_ui, 'last_result') or bt_ui.last_result is None:
+                bt_ui.set_status("No backtest results to export")
+                return
+            
+            result = bt_ui.last_result
+            
+            # Create exporter
+            mt5_config = self.config.get_mt5_config()
+            exporter = BacktestReportExporter(
+                symbol=mt5_config.get('symbol', 'XAUUSD'),
+                timeframe=mt5_config.get('timeframe', 'H1')
+            )
+            
+            # Export JSON
+            filepath = exporter.export_json(
+                summary=result.get('summary', {}),
+                metrics=result.get('metrics', {}),
+                trades_df=result.get('trades_df'),
+                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+            )
+            
+            if filepath:
+                bt_ui.set_status(f"✓ Exported JSON: {filepath.name}")
+                self.logger.info(f"JSON export completed: {filepath}")
+            else:
+                bt_ui.set_status("✗ JSON export failed")
+                
+        except Exception as e:
+            self.logger.error(f"Error exporting JSON: {e}", exc_info=True)
+            if self.window and getattr(self.window, "backtest_window", None):
+                self.window.backtest_window.set_status(f"Export error: {str(e)}")
 
     def _on_export_csv_requested(self):
-        if self.window and getattr(self.window, "backtest_window", None):
-            self.window.backtest_window.set_status("Export CSV not implemented")
+        """Export backtest results as CSV."""
+        try:
+            if not self.window or not getattr(self.window, "backtest_window", None):
+                return
+            
+            bt_ui = self.window.backtest_window
+            
+            # Get backtest data from UI
+            if not hasattr(bt_ui, 'last_result') or bt_ui.last_result is None:
+                bt_ui.set_status("No backtest results to export")
+                return
+            
+            result = bt_ui.last_result
+            
+            # Create exporter
+            mt5_config = self.config.get_mt5_config()
+            exporter = BacktestReportExporter(
+                symbol=mt5_config.get('symbol', 'XAUUSD'),
+                timeframe=mt5_config.get('timeframe', 'H1')
+            )
+            
+            # Export CSV
+            filepath = exporter.export_csv(
+                trades_df=result.get('trades_df'),
+                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+            )
+            
+            if filepath:
+                bt_ui.set_status(f"✓ Exported CSV: {filepath.name}")
+                self.logger.info(f"CSV export completed: {filepath}")
+            else:
+                bt_ui.set_status("✗ CSV export failed")
+                
+        except Exception as e:
+            self.logger.error(f"Error exporting CSV: {e}", exc_info=True)
+            if self.window and getattr(self.window, "backtest_window", None):
+                self.window.backtest_window.set_status(f"Export error: {str(e)}")
 
     def _on_export_html_requested(self):
-        if self.window and getattr(self.window, "backtest_window", None):
-            self.window.backtest_window.set_status("Export HTML not implemented")
+        """Export backtest results as HTML."""
+        try:
+            if not self.window or not getattr(self.window, "backtest_window", None):
+                return
+            
+            bt_ui = self.window.backtest_window
+            
+            # Get backtest data from UI
+            if not hasattr(bt_ui, 'last_result') or bt_ui.last_result is None:
+                bt_ui.set_status("No backtest results to export")
+                return
+            
+            result = bt_ui.last_result
+            
+            # Create exporter
+            mt5_config = self.config.get_mt5_config()
+            exporter = BacktestReportExporter(
+                symbol=mt5_config.get('symbol', 'XAUUSD'),
+                timeframe=mt5_config.get('timeframe', 'H1')
+            )
+            
+            # Export HTML
+            filepath = exporter.export_html(
+                summary=result.get('summary', {}),
+                metrics=result.get('metrics', {}),
+                trades_df=result.get('trades_df'),
+                equity_curve=result.get('equity_curve', []),
+                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+            )
+            
+            if filepath:
+                bt_ui.set_status(f"✓ Exported HTML: {filepath.name}")
+                self.logger.info(f"HTML export completed: {filepath}")
+                
+                # Optional: Open in browser
+                try:
+                    import webbrowser
+                    webbrowser.open(str(filepath))
+                except Exception as e:
+                    self.logger.debug(f"Could not open browser: {e}")
+            else:
+                bt_ui.set_status("✗ HTML export failed")
+                
+        except Exception as e:
+            self.logger.error(f"Error exporting HTML: {e}", exc_info=True)
+            if self.window and getattr(self.window, "backtest_window", None):
+                self.window.backtest_window.set_status(f"Export error: {str(e)}")
     
     @Slot(dict)
     def _on_settings_changed(self, settings: dict):
@@ -1581,7 +1809,7 @@ class TradingController(QObject):
             except (TypeError, ValueError):
                 self.logger.error(f"Invalid ticket value: {ticket}")
                 if self.window:
-                    self.window.log_message(f"Error: Invalid ticket {ticket}")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"Error: Invalid ticket {ticket}"})
                 return
             ticket = ticket_int
             # Find position
@@ -1594,7 +1822,7 @@ class TradingController(QObject):
             if not position:
                 self.logger.error(f"Position {ticket} not found")
                 if self.window:
-                    self.window.log_message(f"Error: Position {ticket} not found")
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"Error: Position {ticket} not found"})
                 return
             
             # Execute close
@@ -1603,7 +1831,7 @@ class TradingController(QObject):
         except Exception as e:
             self.logger.error(f"Error closing position {ticket}: {e}")
             if self.window:
-                self.window.log_message(f"Error closing position: {e}")
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"Error closing position: {e}"})
     
     @Slot(bool)
     def _on_auto_trade_changed(self, enabled: bool):
@@ -1615,6 +1843,46 @@ class TradingController(QObject):
             self.logger.info(f"Auto Trade {'enabled' if enabled else 'disabled'}")
         except Exception as e:
             self.logger.error(f"Error updating auto trade: {e}")
+    
+    def shutdown(self):
+        """
+        Graceful shutdown - stop timers, flush state, close connections.
+        
+        Call this from UI close event to ensure clean shutdown.
+        """
+        try:
+            self.logger.info("=" * 60)
+            self.logger.info("TRADING SYSTEM SHUTTING DOWN")
+            self.logger.info("=" * 60)
+            
+            # Stop trading
+            if self.is_running:
+                self.stop_trading()
+            
+            # Flush pending state writes (blocks until done)
+            self.logger.info("Flushing pending state writes...")
+            self.state_manager.flush()
+            
+            # Shutdown state manager (stops writer thread)
+            self.logger.info("Shutting down state persistence...")
+            self.state_manager.shutdown()
+            
+            # Disconnect from MT5
+            if self.is_connected:
+                self.logger.info("Disconnecting from MT5...")
+                self.disconnect_from_mt5()
+            
+            # Stop UI queue
+            if self.ui_queue:
+                self.logger.info("Stopping UI update queue...")
+                self.ui_queue.stop()
+            
+            self.logger.info("SHUTDOWN COMPLETE")
+            self.logger.info("=" * 60)
+        
+        except Exception as e:
+            self.logger.error(f"Error during shutdown: {e}")
+
 
 
 def main():
@@ -1627,6 +1895,23 @@ def main():
     # Create and show window with config
     window = MainWindow(config=controller.config)
     controller.set_window(window)
+    
+    # Store controller reference for cleanup
+    window._controller = controller
+    
+    # Override closeEvent to ensure graceful shutdown
+    original_close_event = window.closeEvent
+    def close_event_with_shutdown(event):
+        try:
+            # Perform graceful shutdown
+            controller.shutdown()
+        except Exception as e:
+            print(f"Error during shutdown: {e}")
+        finally:
+            # Continue with normal close
+            original_close_event(event)
+    
+    window.closeEvent = close_event_with_shutdown
     window.show()
     
     # Connect to MT5

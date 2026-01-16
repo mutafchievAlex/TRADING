@@ -6,6 +6,7 @@ This module maintains the state of the trading system:
 - Trade history
 - Cooldown tracking
 - Performance statistics
+- Atomic persistence with backups
 """
 
 import json
@@ -13,6 +14,7 @@ import logging
 from datetime import datetime
 from typing import Optional, Dict, List
 from pathlib import Path
+from utils.atomic_state_writer import AtomicStateWriter
 
 
 class StateManager:
@@ -24,18 +26,34 @@ class StateManager:
     - Store trade history
     - Manage cooldown periods
     - Calculate performance metrics
-    - Persist state to disk
+    - Persist state to disk (atomic, thread-safe)
     """
     
-    def __init__(self, state_file: str = "data/state.json"):
+    def __init__(self, state_file: str = "data/state.json",
+                 backup_dir: str = "data/backups",
+                 use_atomic_writes: bool = True):
         """
         Initialize State Manager.
         
         Args:
             state_file: Path to state persistence file
+            backup_dir: Directory for state backups
+            use_atomic_writes: Use atomic writes with file locking (recommended)
         """
         self.state_file = Path(state_file)
         self.logger = logging.getLogger(__name__)
+        self.use_atomic_writes = use_atomic_writes
+        
+        # Initialize atomic writer if enabled
+        if use_atomic_writes:
+            self.atomic_writer = AtomicStateWriter(
+                state_file=str(state_file),
+                backup_dir=backup_dir,
+                batch_interval_seconds=5,
+                max_backups=10
+            )
+        else:
+            self.atomic_writer = None
         
         # Current state - support multiple positions for pyramiding
         self.open_positions: List[Dict] = []  # Changed from single position to list
@@ -350,11 +368,13 @@ class StateManager:
         return self.trade_history[-count:]
     
     def save_state(self):
-        """Persist current state to disk."""
+        """
+        Persist current state to disk (thread-safe, atomic).
+        
+        If atomic writes enabled: queues write, batched every 5 seconds
+        If atomic writes disabled: direct write (NOT recommended)
+        """
         try:
-            # Ensure directory exists
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            
             # Prepare state data
             state_data = {
                 'open_positions': [],
@@ -365,7 +385,6 @@ class StateManager:
                 'losing_trades': self.losing_trades,
                 'total_profit': self.total_profit,
                 'last_regime_state': self.last_regime_state,
-                'saved_at': datetime.now().isoformat()
             }
             
             # Convert datetime objects in open positions if needed
@@ -375,24 +394,58 @@ class StateManager:
                     pos_copy['entry_time'] = pos_copy['entry_time'].isoformat()
                 state_data['open_positions'].append(pos_copy)
             
-            # Write to file
-            with open(self.state_file, 'w') as f:
-                json.dump(state_data, f, indent=2)
-            
-            self.logger.debug(f"State saved to {self.state_file}")
+            # Use atomic writer if available, otherwise fallback to direct write
+            if self.atomic_writer:
+                # Queue write - will be batched and written every 5 seconds
+                self.atomic_writer.queue_write(state_data)
+            else:
+                # Fallback to direct write (less safe, but works if atomic disabled)
+                self._direct_write(state_data)
             
         except Exception as e:
             self.logger.error(f"Error saving state: {e}")
     
-    def load_state(self):
-        """Load state from disk if file exists."""
+    def _direct_write(self, state_data: Dict):
+        """
+        Direct write to file (fallback, NOT thread-safe).
+        
+        Used only if atomic writes are disabled.
+        """
         try:
-            if not self.state_file.exists():
-                self.logger.info("No existing state file found, starting fresh")
-                return
+            # Ensure directory exists
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
             
-            with open(self.state_file, 'r') as f:
-                state_data = json.load(f)
+            # Write to file
+            with open(self.state_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+            
+            self.logger.debug(f"State saved (direct write) to {self.state_file}")
+        
+        except Exception as e:
+            self.logger.error(f"Error in direct write: {e}")
+
+    
+    def load_state(self):
+        """
+        Load state from disk with integrity validation.
+        
+        If atomic writer available: validates checksum and recovers from backups
+        If corrupted: attempts recovery from most recent backup
+        If all backups corrupted: starts fresh
+        """
+        try:
+            state_data = None
+            
+            # Try atomic loader if available
+            if self.atomic_writer:
+                state_data = self.atomic_writer.load_with_validation()
+            else:
+                # Fallback to direct load
+                state_data = self._direct_load()
+            
+            if not state_data:
+                self.logger.info("No valid state file found, starting fresh")
+                return
             
             # Restore state - handle both old format (current_position) and new (open_positions)
             if 'open_positions' in state_data:
@@ -421,6 +474,25 @@ class StateManager:
             
         except Exception as e:
             self.logger.error(f"Error loading state: {e}")
+    
+    def _direct_load(self) -> Optional[Dict]:
+        """
+        Direct load from file (fallback, less safe).
+        
+        Used only if atomic writer not available.
+        """
+        try:
+            if not self.state_file.exists():
+                self.logger.info("No existing state file found, starting fresh")
+                return None
+            
+            with open(self.state_file, 'r') as f:
+                return json.load(f)
+        
+        except Exception as e:
+            self.logger.error(f"Error in direct load: {e}")
+            return None
+
 
     def set_regime_state(self, regime_state: Dict):
         """Update and persist the latest market regime state."""
@@ -441,7 +513,32 @@ class StateManager:
         self.total_profit = 0.0
         
         self.save_state()
+        self.flush()  # Ensure reset is written immediately
         self.logger.warning("State has been reset")
+    
+    def flush(self):
+        """Force immediate write of pending state (blocks)."""
+        try:
+            if self.atomic_writer:
+                self.atomic_writer.flush()
+        except Exception as e:
+            self.logger.error(f"Error flushing state: {e}")
+    
+    def shutdown(self):
+        """Graceful shutdown - flush pending writes and stop writer thread."""
+        try:
+            self.logger.info("Shutting down StateManager...")
+            
+            # Flush any pending writes
+            self.flush()
+            
+            # Stop atomic writer thread
+            if self.atomic_writer:
+                self.atomic_writer.stop()
+            
+            self.logger.info("StateManager shutdown complete")
+        except Exception as e:
+            self.logger.error(f"Error during shutdown: {e}")
 
 
 if __name__ == "__main__":
