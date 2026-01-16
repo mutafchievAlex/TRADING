@@ -439,7 +439,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
@@ -463,6 +463,9 @@ from utils.config import load_config
 from utils.logger import setup_logging
 from utils.runtime_mode_manager import RuntimeModeManager, get_runtime_manager
 from utils.ui_update_queue import UIUpdateQueue, UIEventType
+from utils.health_monitor import HealthMonitor, HealthStatus
+from utils.performance_monitor import PerformanceMonitor, OperationType
+from utils.alert_manager import AlertManager, AlertType, AlertSeverity
 from ui.main_window import MainWindow
 from ui.backtest_window import BacktestWorker
 
@@ -524,6 +527,7 @@ class TradingController(QObject):
         self.is_running = False
         self.is_connected = False
         self.auto_trade_enabled = False  # User's auto trade checkbox state
+        self.app_start_time = datetime.now()
         
         # Timer for main loop
         self.timer = QTimer()
@@ -546,6 +550,33 @@ class TradingController(QObject):
         self.ui_queue = UIUpdateQueue(max_queue_size=1000, process_interval_ms=100)
         self.ui_queue.events_available.connect(self._process_ui_events)
         self.logger.info("Thread-safe UI update queue initialized")
+        
+        # Health Monitor (system diagnostics)
+        state_file_path = Path(__file__).parent.parent / "data" / "state.json"
+        self.health_monitor = HealthMonitor(
+            state_file=state_file_path,
+            memory_threshold_mb=500.0,
+            disk_threshold_gb=1.0,
+            queue_depth_threshold=100
+        )
+        
+        # Timer for health checks (every 30 seconds)
+        self.health_check_timer = QTimer()
+        self.health_check_timer.timeout.connect(self._perform_health_check)
+        self.health_check_interval = 30 * 1000  # 30 seconds
+        self.logger.info("Health monitor initialized")
+        
+        # Performance Monitor (execution time tracking)
+        self.performance_monitor = PerformanceMonitor(max_samples_per_operation=1000)
+        self.logger.info("Performance monitor initialized")
+        
+        # Alert Manager (notifications)
+        self.alert_manager = AlertManager(max_history=500, min_alert_interval_seconds=5.0)
+        self.alert_manager.add_handler(self._handle_alert)
+        self.logger.info("Alert manager initialized")
+        
+        # Send startup alert
+        self.alert_manager.alert_system_startup()
     
     def _initialize_engines(self):
         """Initialize all trading engines."""
@@ -732,6 +763,7 @@ class TradingController(QObject):
         self.logger.info("Trading started")
         self.timer.start(self.refresh_interval)
         self.heartbeat_timer.start(self.heartbeat_interval)  # Start heartbeat
+        self.health_check_timer.start(self.health_check_interval)  # Start health checks
         
         if self.window:
             self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "Trading started"})
@@ -741,6 +773,7 @@ class TradingController(QObject):
         self.is_running = False
         self.timer.stop()
         self.heartbeat_timer.stop()  # Stop heartbeat
+        self.health_check_timer.stop()  # Stop health checks
         self.logger.info("Trading stopped")
         
         if self.window:
@@ -788,6 +821,78 @@ class TradingController(QObject):
         except Exception as e:
             self.logger.error(f"Heartbeat error: {e}", exc_info=True)
     
+    def _perform_health_check(self):
+        """Perform periodic system health check."""
+        try:
+            # Get queue depths
+            ui_queue_depth = self.ui_queue.get_queue_size()
+            state_queue_depth = 0
+            if hasattr(self.state_manager, 'atomic_writer') and self.state_manager.atomic_writer:
+                state_queue_depth = self.state_manager.atomic_writer.get_queue_depth()
+            
+            # Perform health checks
+            health_checks = self.health_monitor.check_all(
+                mt5_connected=self.is_connected,
+                ui_queue_depth=ui_queue_depth,
+                state_queue_depth=state_queue_depth
+            )
+            
+            # Get overall status
+            overall_status = self.health_monitor.get_overall_status(health_checks)
+            summary = self.health_monitor.get_summary(health_checks)
+            
+            # Log warnings and critical issues, send alerts
+            for check in health_checks.values():
+                if check.status == HealthStatus.CRITICAL:
+                    self.logger.error(f"HEALTH CHECK CRITICAL: {check.message}")
+                    self.alert_manager.alert_health_critical(check.message)
+                elif check.status == HealthStatus.WARNING:
+                    self.logger.warning(f"HEALTH CHECK WARNING: {check.message}")
+                    self.alert_manager.alert_health_warning(check.message)
+            
+            # Check for performance issues (operations > 1000ms)
+            slowest = self.performance_monitor.get_slowest_operations(top_n=1)
+            if slowest and slowest[0]['avg_ms'] > 1000:
+                self.alert_manager.alert_performance_issue(
+                    slowest[0]['operation'],
+                    slowest[0]['avg_ms']
+                )
+            
+            # Update UI with health status
+            if self.window:
+                self.ui_queue.post_event(UIEventType.UPDATE_STATUS, {
+                    'message': summary
+                })
+            
+            # Log overall health summary
+            self.logger.debug(f"Health check: {summary}")
+            
+            # Log performance metrics periodically (every 5 health checks = 2.5 min)
+            if self.health_monitor.check_history and len(self.health_monitor.check_history) % 5 == 0:
+                perf_summary = self.performance_monitor.get_summary_string()
+                self.logger.info(f"Performance: {perf_summary}")
+        
+        except Exception as e:
+            self.logger.error(f"Health check error: {e}", exc_info=True)
+    
+    def _handle_alert(self, alert):
+        """Handle alerts by forwarding to UI and logging."""
+        try:
+            # Log the alert
+            log_message = str(alert)
+            if alert.severity == AlertSeverity.CRITICAL:
+                self.logger.error(f"ALERT: {log_message}")
+            elif alert.severity == AlertSeverity.WARNING:
+                self.logger.warning(f"ALERT: {log_message}")
+            else:
+                self.logger.info(f"ALERT: {log_message}")
+            
+            # Forward to UI
+            if self.window:
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': log_message})
+        except Exception as e:
+            self.logger.error(f"Error handling alert: {e}", exc_info=True)
+    
     def _on_connection_status_change(self, is_connected: bool):
         """
         Handle connection status changes from Connection Manager.
@@ -801,6 +906,9 @@ class TradingController(QObject):
         self.is_connected = is_connected
         
         if not is_connected and self.is_running:
+            # Send critical alert
+            self.alert_manager.alert_connection_lost()
+            
             self.logger.error("🔴 CRITICAL: Connection lost during trading!")
             self.logger.error("=" * 60)
             self.logger.error("ACTION: Stopping trading loop to protect open positions")
@@ -985,10 +1093,18 @@ class TradingController(QObject):
             if not self.is_running or not self.is_connected:
                 return
             
+            # Start main loop timer for performance monitoring
+            loop_timer = f"main_loop_{int(time.time() * 1000) % 100000}"
+            self.performance_monitor.start_timer(loop_timer)
+            
             self.logger.debug("Main loop iteration")
             
             # 1. Fetch market data
+            data_timer = f"market_data_fetch_{int(time.time() * 1000) % 100000}"
+            self.performance_monitor.start_timer(data_timer)
             df = self.market_data.get_bars(count=self.config.get('data.bars_to_fetch', 500))
+            self.performance_monitor.end_timer(data_timer, OperationType.MARKET_DATA_FETCH)
+            
             if df is None:
                 self.logger.warning("Failed to fetch market data from MT5")
                 return
@@ -1028,10 +1144,15 @@ class TradingController(QObject):
     def _check_entry(self, df, pattern, current_bar):
         """Check for entry signal and execute trade if conditions met."""
         try:
-            # Evaluate entry conditions
+            # Evaluate entry conditions with performance timing
+            entry_timer = f"entry_eval_{int(time.time() * 1000) % 100000}"
+            self.performance_monitor.start_timer(entry_timer)
+            
             should_enter, entry_details = self.strategy_engine.evaluate_entry(
                 df, pattern, current_bar_index=-2
             )
+            
+            self.performance_monitor.end_timer(entry_timer, OperationType.ENTRY_EVALUATION)
             
             # Update UI with entry conditions (thread-safe)
             if self.window:
@@ -1180,6 +1301,15 @@ class TradingController(QObject):
                 })
                 
                 self.logger.info(f"Trade executed successfully: Ticket {ticket}, Entry={actual_entry_price:.5f}")
+                
+                # Send alert for position opened
+                self.alert_manager.alert_position_opened({
+                    'ticket': ticket,
+                    'entry_price': actual_entry_price,
+                    'stop_loss': entry_details['stop_loss'],
+                    'take_profit': take_profit_price,
+                    'volume': position_size
+                })
                 
                 if self.window:
                     self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"TRADE OPENED: Ticket {ticket} @ {actual_entry_price:.5f}"})
@@ -1391,6 +1521,14 @@ class TradingController(QObject):
                 
                 self.logger.info(f"Position closed: {reason}, Profit: ${position['profit']:.2f}")
                 
+                # Send alert for position closed
+                self.alert_manager.alert_position_closed({
+                    'ticket': ticket,
+                    'exit_price': exit_price,
+                    'profit': position['profit'],
+                    'exit_reason': reason
+                })
+                
                 if self.window:
                     self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"POSITION CLOSED: {reason}, P/L: ${position['profit']:.2f}"})
                     # Update position display with remaining positions
@@ -1457,10 +1595,21 @@ class TradingController(QObject):
             # self.ui_queue.post_event(UIEventType.UPDATE_QUALITY_SCORE, {'data': None})
             # self.ui_queue.post_event(UIEventType.UPDATE_GUARD_STATUS, {'data': None})
             
-            # Post statistics update
+            # Post statistics update (live dashboard)
             stats = self.state_manager.get_statistics()
+            alert_stats = self.alert_manager.get_statistics() if self.alert_manager else {}
+            ui_queue_stats = self.ui_queue.get_statistics() if self.ui_queue else {}
+            perf_top = self.performance_monitor.get_slowest_operations(top_n=3)
+            perf_all = self.performance_monitor.get_all_metrics()
+            uptime_seconds = (datetime.now() - self.app_start_time).total_seconds()
+
             self.ui_queue.post_event(UIEventType.UPDATE_STATISTICS, {
-                'stats': stats
+                'trade_stats': stats,
+                'uptime_seconds': uptime_seconds,
+                'alert_stats': alert_stats,
+                'ui_queue_stats': ui_queue_stats,
+                'performance_top': perf_top,
+                'performance_all': perf_all
             })
             
             # Update account info (thread-safe)
@@ -1855,6 +2004,17 @@ class TradingController(QObject):
             self.logger.info("TRADING SYSTEM SHUTTING DOWN")
             self.logger.info("=" * 60)
             
+            # Send shutdown alert
+            self.alert_manager.alert_system_shutdown()
+            
+            # Log performance metrics before shutdown
+            perf_report = self.performance_monitor.get_performance_report()
+            self.logger.info("Performance metrics at shutdown:\n" + perf_report)
+            
+            # Log alert summary
+            alert_summary = self.alert_manager.get_summary()
+            self.logger.info(f"Alert summary: {alert_summary}")
+            
             # Stop trading
             if self.is_running:
                 self.stop_trading()
@@ -1882,6 +2042,14 @@ class TradingController(QObject):
         
         except Exception as e:
             self.logger.error(f"Error during shutdown: {e}")
+    
+    def get_performance_metrics(self) -> Dict:
+        """Get all performance metrics (for external monitoring)."""
+        return self.performance_monitor.get_all_metrics()
+    
+    def get_performance_report(self) -> str:
+        """Get formatted performance report (for logging/display)."""
+        return self.performance_monitor.get_performance_report()
 
 
 

@@ -6,14 +6,14 @@ and controlling the trading system.
 """
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QTextEdit, QTableWidget, QTableWidgetItem,
     QStatusBar, QTabWidget, QCheckBox, QSpinBox, QDoubleSpinBox, QMessageBox,
     QSplitter, QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont, QColor
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import yaml
 
@@ -693,20 +693,44 @@ class MainWindow(QMainWindow):
         # Statistics
         stats_group = QGroupBox("Performance Statistics")
         stats_layout = QVBoxLayout()
+
+        # Trading metrics
+        trading_layout = QGridLayout()
+        trading_layout.setSpacing(6)
         self.lbl_total_trades = QLabel("Total Trades: 0")
         self.lbl_win_rate = QLabel("Win Rate: 0%")
         self.lbl_total_profit = QLabel("Total Profit: $0.00")
         self.lbl_avg_win = QLabel("Avg Win: $0.00")
         self.lbl_avg_loss = QLabel("Avg Loss: $0.00")
         self.lbl_profit_factor = QLabel("Profit Factor: 0.00")
-        
-        stats_layout.addWidget(self.lbl_total_trades)
-        stats_layout.addWidget(self.lbl_win_rate)
-        stats_layout.addWidget(self.lbl_total_profit)
-        stats_layout.addWidget(self.lbl_avg_win)
-        stats_layout.addWidget(self.lbl_avg_loss)
-        stats_layout.addWidget(self.lbl_profit_factor)
-        
+        self.lbl_last_trade = QLabel("Last Trade: --")
+
+        trading_layout.addWidget(self.lbl_total_trades, 0, 0)
+        trading_layout.addWidget(self.lbl_win_rate, 0, 1)
+        trading_layout.addWidget(self.lbl_total_profit, 1, 0)
+        trading_layout.addWidget(self.lbl_profit_factor, 1, 1)
+        trading_layout.addWidget(self.lbl_avg_win, 2, 0)
+        trading_layout.addWidget(self.lbl_avg_loss, 2, 1)
+        trading_layout.addWidget(self.lbl_last_trade, 3, 0, 1, 2)
+
+        stats_layout.addLayout(trading_layout)
+
+        # System dashboard
+        system_group = QGroupBox("Live System Dashboard")
+        system_layout = QVBoxLayout()
+        self.lbl_uptime = QLabel("Uptime: 0s")
+        self.lbl_alerts = QLabel("Alerts: 0 critical / 0 warn / 0 info")
+        self.lbl_queue_stats = QLabel("UI Queue: pending 0/0, posted 0, processed 0, dropped 0")
+        self.lbl_perf_snapshot = QLabel("Performance: waiting for data")
+        self.lbl_perf_snapshot.setWordWrap(True)
+
+        system_layout.addWidget(self.lbl_uptime)
+        system_layout.addWidget(self.lbl_alerts)
+        system_layout.addWidget(self.lbl_queue_stats)
+        system_layout.addWidget(self.lbl_perf_snapshot)
+        system_group.setLayout(system_layout)
+
+        stats_layout.addWidget(system_group)
         stats_group.setLayout(stats_layout)
         layout.addWidget(stats_group)
         
@@ -1669,14 +1693,62 @@ class MainWindow(QMainWindow):
             self.lbl_newyork.setText("● New York")
             self.lbl_newyork.setStyleSheet("color: gray;")
     
-    def update_statistics(self, stats: dict):
-        """Update performance statistics display."""
-        self.lbl_total_trades.setText(f"Total Trades: {stats.get('total_trades', 0)}")
-        self.lbl_win_rate.setText(f"Win Rate: {stats.get('win_rate', 0):.1f}%")
-        self.lbl_total_profit.setText(f"Total Profit: ${stats.get('total_profit', 0):.2f}")
-        self.lbl_avg_win.setText(f"Avg Win: ${stats.get('average_win', 0):.2f}")
-        self.lbl_avg_loss.setText(f"Avg Loss: ${stats.get('average_loss', 0):.2f}")
-        self.lbl_profit_factor.setText(f"Profit Factor: {stats.get('profit_factor', 0):.2f}")
+    def update_statistics(self, **stats):
+        """Update performance and system statistics display."""
+        trade_stats = stats.get('trade_stats', {}) if isinstance(stats, dict) else {}
+        uptime_seconds = stats.get('uptime_seconds', 0) if isinstance(stats, dict) else 0
+        alert_stats = stats.get('alert_stats', {}) if isinstance(stats, dict) else {}
+        ui_queue_stats = stats.get('ui_queue_stats', {}) if isinstance(stats, dict) else {}
+        perf_top = stats.get('performance_top', []) if isinstance(stats, dict) else []
+
+        self.lbl_total_trades.setText(f"Total Trades: {trade_stats.get('total_trades', 0)}")
+        self.lbl_win_rate.setText(f"Win Rate: {trade_stats.get('win_rate', 0):.1f}%")
+        self.lbl_total_profit.setText(f"Total Profit: ${trade_stats.get('total_profit', 0):.2f}")
+        self.lbl_avg_win.setText(f"Avg Win: ${trade_stats.get('average_win', 0):.2f}")
+        self.lbl_avg_loss.setText(f"Avg Loss: ${trade_stats.get('average_loss', 0):.2f}")
+        self.lbl_profit_factor.setText(f"Profit Factor: {trade_stats.get('profit_factor', 0):.2f}")
+
+        last_trade = trade_stats.get('last_trade_time')
+        if last_trade:
+            try:
+                parsed_time = datetime.fromisoformat(last_trade)
+                self.lbl_last_trade.setText(f"Last Trade: {parsed_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                self.lbl_last_trade.setText(f"Last Trade: {last_trade}")
+        else:
+            self.lbl_last_trade.setText("Last Trade: --")
+
+        uptime_str = str(timedelta(seconds=int(uptime_seconds))) if uptime_seconds else "0s"
+        self.lbl_uptime.setText(f"Uptime: {uptime_str}")
+
+        critical = alert_stats.get('critical_count', 0)
+        warning = alert_stats.get('warning_count', 0)
+        info = alert_stats.get('info_count', 0)
+        total_alerts = alert_stats.get('total_alerts', 0)
+        self.lbl_alerts.setText(
+            f"Alerts: {critical} critical / {warning} warn / {info} info (Total: {total_alerts})"
+        )
+
+        self.lbl_queue_stats.setText(
+            "UI Queue: pending {pending}/{capacity}, posted {posted}, processed {processed}, dropped {dropped}".format(
+                pending=ui_queue_stats.get('pending', 0),
+                capacity=ui_queue_stats.get('capacity', 0),
+                posted=ui_queue_stats.get('events_posted', 0),
+                processed=ui_queue_stats.get('events_processed', 0),
+                dropped=ui_queue_stats.get('events_dropped', 0)
+            )
+        )
+
+        if perf_top:
+            perf_parts = []
+            for op in perf_top:
+                perf_parts.append(
+                    f"{op.get('operation', '')}: avg {op.get('avg_ms', 0):.1f}ms, p95 {op.get('p95_ms', 0):.1f}ms, SR {op.get('success_rate', 0):.0f}%"
+                )
+            perf_text = " | ".join(perf_parts)
+        else:
+            perf_text = "Performance: no samples yet"
+        self.lbl_perf_snapshot.setText(perf_text)
     
     def update_trade_history(self):
         """Update trade history table from state manager."""

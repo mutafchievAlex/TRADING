@@ -269,6 +269,10 @@ class AtomicStateWriter:
             self.logger.error(f"Error flushing state: {e}")
             return False
     
+    def get_queue_depth(self) -> int:
+        """Get number of pending writes (for health monitoring)."""
+        return 1 if self.pending_write else 0
+    
     def stop(self):
         """Stop writer thread and flush pending writes."""
         self.logger.info("Stopping atomic state writer...")

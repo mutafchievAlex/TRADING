@@ -253,6 +253,10 @@ class UIUpdateQueue(QObject):
                 'capacity': self.max_queue_size
             }
     
+    def get_queue_size(self) -> int:
+        """Get current queue size (for health monitoring)."""
+        return self.queue.qsize()
+    
     def get_status_string(self) -> str:
         """Get human-readable status string."""
         stats = self.get_statistics()
