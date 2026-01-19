@@ -166,6 +166,8 @@ class StateManager:
             entry_price = position_to_close['entry_price']
             volume = position_to_close['volume']
             profit = (exit_price - entry_price) * volume * 100  # Simplified P&L calculation
+
+            normalized_exit_reason = self._normalize_exit_reason(exit_reason)
             
             # Create trade record
             trade_record = {
@@ -180,14 +182,14 @@ class StateManager:
                 'take_profit': position_to_close['take_profit'],
                 'volume': volume,
                 'profit': profit,
-                'exit_reason': exit_reason,
+                'exit_reason': normalized_exit_reason,
                 'pattern_info': position_to_close.get('pattern_info'),
                 'is_winner': profit > 0
             }
             
             # Debug log - verify exit_reason is text, not a price
             self.logger.info(f"Trade record created: ticket={trade_record['ticket']}, "
-                           f"exit_reason='{exit_reason}' (type: {type(exit_reason).__name__}), "
+                           f"exit_reason='{normalized_exit_reason}' (type: {type(normalized_exit_reason).__name__}), "
                            f"take_profit={trade_record['take_profit']}")
             
             # Update statistics
@@ -201,7 +203,7 @@ class StateManager:
                 self.losing_trades += 1
             
             self.logger.info(f"Position closed: Ticket={trade_record['ticket']}, "
-                           f"Profit=${profit:.2f}, Reason={exit_reason}, "
+                           f"Profit=${profit:.2f}, Reason={normalized_exit_reason}, "
                            f"Remaining: {len(self.open_positions)-1}")
             
             # Remove closed position
@@ -211,6 +213,15 @@ class StateManager:
             
         except Exception as e:
             self.logger.error(f"Error closing position: {e}")
+
+    @staticmethod
+    def _normalize_exit_reason(exit_reason: Optional[object]) -> str:
+        """Ensure exit reason is a readable string (never numeric)."""
+        if exit_reason is None:
+            return "Unknown"
+        if isinstance(exit_reason, (int, float)):
+            return f"Exit price {exit_reason:.2f}"
+        return str(exit_reason)
     
     def has_open_position(self) -> bool:
         """Check if there are any open positions."""
