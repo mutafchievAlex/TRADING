@@ -286,9 +286,11 @@ class StateManager:
                         position['bars_held_after_tp1'] = bars_after_tp1
                     if bars_after_tp2 is not None:
                         position['bars_held_after_tp2'] = bars_after_tp2
+
+                    sl_text = f"{new_stop_loss:.2f}" if new_stop_loss is not None else "N/A"
                         
                     self.logger.info(f"Ticket {ticket}: TP state {old_state} -> {new_tp_state}, "
-                                   f"SL updated to {new_stop_loss:.2f if new_stop_loss else 'N/A'}")
+                                   f"SL updated to {sl_text}")
                     
                     self.save_state()
                     return True
