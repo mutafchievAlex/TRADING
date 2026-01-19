@@ -129,8 +129,10 @@ class StateManager:
         except Exception as e:
             self.logger.error(f"Error opening position: {e}")
     
-    def close_position(self, exit_price: float, exit_reason: str, 
-                      exit_time: Optional[datetime] = None, ticket: Optional[int] = None):
+    def close_position(self, exit_price: float, exit_reason: str,
+                      exit_time: Optional[datetime] = None, ticket: Optional[int] = None,
+                      symbol_info: Optional[Dict] = None, risk_engine: Optional[object] = None,
+                      swap: Optional[float] = None):
         """
         Close a position and record the trade.
         
@@ -139,6 +141,9 @@ class StateManager:
             exit_reason: Reason for exit ("Stop Loss", "Take Profit", etc.)
             exit_time: Exit timestamp (default: now)
             ticket: Specific ticket to close (if None, close first position)
+            symbol_info: Optional symbol metadata for accurate P&L
+            risk_engine: Optional risk engine for commission calculation
+            swap: Optional swap value from broker
         """
         try:
             if not self.open_positions:
@@ -165,7 +170,44 @@ class StateManager:
             # Calculate P&L
             entry_price = position_to_close['entry_price']
             volume = position_to_close['volume']
-            profit = (exit_price - entry_price) * volume * 100  # Simplified P&L calculation
+            direction = position_to_close.get('direction', 1)
+            price_diff = (exit_price - entry_price) * direction
+
+            contract_size = 100.0
+            point_value = None
+            if symbol_info:
+                contract_size = symbol_info.get('trade_contract_size', contract_size)
+                tick_value = symbol_info.get('tick_value')
+                tick_size = symbol_info.get('tick_size') or symbol_info.get('point')
+                if tick_value is not None and tick_size:
+                    point_value = tick_value / tick_size
+
+            if point_value is None:
+                point_value = contract_size
+
+            commission_total = 0.0
+            if risk_engine and symbol_info:
+                adjusted_exit = exit_price if direction == 1 else (entry_price - (exit_price - entry_price))
+                pl_result = risk_engine.calculate_potential_profit_loss(
+                    position_size=volume,
+                    entry_price=entry_price,
+                    exit_price=adjusted_exit,
+                    symbol_info=symbol_info
+                )
+                gross_pl = pl_result.get('gross_pl', 0.0)
+                commission_total = pl_result.get('commission', 0.0)
+            else:
+                gross_pl = price_diff * volume * point_value
+                if risk_engine:
+                    commission_total = risk_engine.commission_per_lot * volume * 2
+                elif position_to_close.get('commission') is not None:
+                    commission_total = position_to_close.get('commission', 0.0)
+
+            if point_value is not None and point_value != contract_size:
+                gross_pl = price_diff * volume * point_value
+
+            swap_value = swap if swap is not None else position_to_close.get('swap', 0.0)
+            net_pl = gross_pl - commission_total + swap_value
 
             normalized_exit_reason = self._normalize_exit_reason(exit_reason)
             
@@ -181,10 +223,14 @@ class StateManager:
                 'stop_loss': position_to_close['stop_loss'],
                 'take_profit': position_to_close['take_profit'],
                 'volume': volume,
-                'profit': profit,
+                'profit': net_pl,
+                'gross_pl': gross_pl,
+                'commission': commission_total,
+                'swap': swap_value,
+                'net_pl': net_pl,
                 'exit_reason': normalized_exit_reason,
                 'pattern_info': position_to_close.get('pattern_info'),
-                'is_winner': profit > 0
+                'is_winner': net_pl > 0
             }
             
             # Debug log - verify exit_reason is text, not a price
@@ -195,15 +241,15 @@ class StateManager:
             # Update statistics
             self.trade_history.append(trade_record)
             self.total_trades += 1
-            self.total_profit += profit
+            self.total_profit += net_pl
             
-            if profit > 0:
+            if net_pl > 0:
                 self.winning_trades += 1
             else:
                 self.losing_trades += 1
             
             self.logger.info(f"Position closed: Ticket={trade_record['ticket']}, "
-                           f"Profit=${profit:.2f}, Reason={normalized_exit_reason}, "
+                           f"Profit=${net_pl:.2f}, Reason={normalized_exit_reason}, "
                            f"Remaining: {len(self.open_positions)-1}")
             
             # Remove closed position

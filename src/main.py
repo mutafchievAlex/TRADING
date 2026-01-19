@@ -1330,6 +1330,7 @@ class TradingController(QObject):
             if not all_positions:
                 return
             
+            symbol_info = self.market_data.get_symbol_info()
             # Get live positions from MT5
             live_positions = self.execution_engine.get_open_positions()
             live_tickets = {pos['ticket']: pos for pos in live_positions}
@@ -1345,7 +1346,9 @@ class TradingController(QObject):
                     self.state_manager.close_position(
                         exit_price=current_bar['close'],
                         exit_reason="Closed externally",
-                        ticket=ticket
+                        ticket=ticket,
+                        symbol_info=symbol_info,
+                        risk_engine=self.risk_engine
                     )
                     continue
                 
@@ -1353,6 +1356,7 @@ class TradingController(QObject):
                 live_position = live_tickets[ticket]
                 position_data['price_current'] = live_position['price_current']
                 position_data['profit'] = live_position['profit']
+                position_data['swap'] = live_position.get('swap', 0.0)
                 
                 # Check exit conditions with multi-level TP support
                 tp_state = position_data.get('tp_state', 'IN_TRADE')
@@ -1504,10 +1508,14 @@ class TradingController(QObject):
             
             if success:
                 # Update state manager
+                symbol_info = self.market_data.get_symbol_info()
                 self.state_manager.close_position(
                     exit_price=exit_price,
                     exit_reason=reason,
-                    ticket=ticket
+                    ticket=ticket,
+                    symbol_info=symbol_info,
+                    risk_engine=self.risk_engine,
+                    swap=position.get('swap', 0.0)
                 )
                 
                 # Log trade
@@ -1660,7 +1668,8 @@ class TradingController(QObject):
                 pattern_engine=self.pattern_engine,
                 strategy_engine=self.strategy_engine,
                 state_manager=self.state_manager,
-                execution_engine=self.execution_engine
+                execution_engine=self.execution_engine,
+                risk_engine=self.risk_engine
             )
             
             # Log recovery result
