@@ -8,6 +8,7 @@ This module implements strict risk management:
 """
 
 import logging
+import math
 from typing import Optional
 
 
@@ -77,11 +78,20 @@ class RiskEngine:
             volume_max = symbol_info.get('volume_max', 100.0)
             volume_step = symbol_info.get('volume_step', 0.01)
             
-            # Round to nearest volume step
-            position_size = round(position_size / volume_step) * volume_step
+            # Round down to volume step
+            position_size = math.floor(position_size / volume_step) * volume_step
             
             # Clamp to min/max
             position_size = max(volume_min, min(position_size, volume_max))
+
+            # Validate risk and reduce one step if still exceeds
+            if not self.validate_risk(equity, entry_price, stop_loss, position_size, symbol_info):
+                position_size = max(volume_min, position_size - volume_step)
+
+            actual_risk = (price_risk * position_size * contract_size) + (
+                self.commission_per_lot * position_size * 2
+            )
+            actual_risk_percent = (actual_risk / equity) * 100 if equity else 0.0
             
             # Log calculation
             self.logger.info(f"Position size calculation:")
@@ -90,7 +100,8 @@ class RiskEngine:
             self.logger.info(f"  Risk amount: ${risk_amount:.2f}")
             self.logger.info(f"  Price risk: {price_risk:.5f}")
             self.logger.info(f"  Contract size: {contract_size}")
-            self.logger.info(f"  Position size: {position_size:.2f} lots")
+            self.logger.info(f"  Final position size: {position_size:.2f} lots")
+            self.logger.info(f"  Actual risk: {actual_risk_percent:.2f}%")
             
             return position_size
             
