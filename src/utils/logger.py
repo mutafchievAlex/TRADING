@@ -109,6 +109,16 @@ class TradingLogger:
         logger.addHandler(console_handler)
         
         return logger
+
+    @staticmethod
+    def _fmt_float(value, default: str = "N/A") -> str:
+        """Safely format numeric values for log output."""
+        try:
+            if value is None:
+                return default
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return default
     
     def log_trade(self, trade_data: dict):
         """
@@ -123,23 +133,25 @@ class TradingLogger:
         if trade_type == 'ENTRY':
             self.trade_logger.info(
                 f"ENTRY | Ticket: {trade_data.get('ticket')} | "
-                f"Price: {trade_data.get('entry_price'):.2f} | "
-                f"SL: {trade_data.get('stop_loss'):.2f} | "
-                f"TP: {trade_data.get('take_profit'):.2f} | "
-                f"Volume: {trade_data.get('volume'):.2f} | "
+                f"Price: {self._fmt_float(trade_data.get('entry_price'))} | "
+                f"SL: {self._fmt_float(trade_data.get('stop_loss'))} | "
+                f"TP: {self._fmt_float(trade_data.get('take_profit'))} | "
+                f"Volume: {self._fmt_float(trade_data.get('volume'))} | "
                 f"Pattern: {trade_data.get('pattern_type', 'N/A')}"
             )
         elif trade_type == 'EXIT':
+            profit_value = self._fmt_float(trade_data.get('profit'))
+            profit_display = f"${profit_value}" if profit_value != "N/A" else "N/A"
             self.trade_logger.info(
                 f"EXIT | Ticket: {trade_data.get('ticket')} | "
-                f"Exit Price: {trade_data.get('exit_price'):.2f} | "
-                f"Profit: ${trade_data.get('profit'):.2f} | "
+                f"Exit Price: {self._fmt_float(trade_data.get('exit_price'))} | "
+                f"Profit: {profit_display} | "
                 f"Reason: {trade_data.get('exit_reason')}"
             )
         elif trade_type == 'SIGNAL':
             self.trade_logger.info(
                 f"SIGNAL | {trade_data.get('message', 'Entry signal detected')} | "
-                f"Price: {trade_data.get('price'):.2f}"
+                f"Price: {self._fmt_float(trade_data.get('price'))}"
             )
     
     def log_decision(self, decision_type: str, message: str, details: dict = None):
