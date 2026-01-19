@@ -196,14 +196,35 @@ class ExecutionEngine:
                 return False
             
             position = position[0]
-            
+
+            symbol_info = mt5.symbol_info(self.symbol)
+            if symbol_info is None:
+                self.logger.error("Symbol info unavailable for %s (symbol not tradeable).", self.symbol)
+                return False
+
+            if not symbol_info.visible or not symbol_info.trade_allowed:
+                self.logger.warning(
+                    "Symbol %s not tradeable (visible=%s trade_allowed=%s). Attempting symbol_select.",
+                    self.symbol,
+                    symbol_info.visible,
+                    symbol_info.trade_allowed,
+                )
+                if not mt5.symbol_select(self.symbol, True):
+                    self.logger.error("Symbol %s not tradeable after symbol_select.", self.symbol)
+                    return False
+
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                self.logger.error("Tick unavailable for %s; cannot close position.", self.symbol)
+                return False
+
             # Determine close order type (opposite of position)
             if position.type == mt5.POSITION_TYPE_BUY:
                 order_type = mt5.ORDER_TYPE_SELL
-                price = mt5.symbol_info_tick(self.symbol).bid
+                price = tick.bid
             else:
                 order_type = mt5.ORDER_TYPE_BUY
-                price = mt5.symbol_info_tick(self.symbol).ask
+                price = tick.ask
 
             if close_price is not None:
                 self.logger.info(
