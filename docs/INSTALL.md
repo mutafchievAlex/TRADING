@@ -57,6 +57,7 @@ This will install:
 - pandas (Data manipulation)
 - numpy (Numerical computations)
 - PyYAML (Configuration files)
+- psutil (System monitoring)
 - PySide6 (Desktop UI)
 - pytest (Testing framework)
 
@@ -87,6 +88,7 @@ Checking dependencies...
   ✓ pandas
   ✓ numpy
   ✓ PyYAML
+  ✓ psutil
   ✓ PySide6
 ... (more checks)
 ============================================================
