@@ -49,7 +49,8 @@ class RecoveryEngine:
                         pattern_engine,
                         strategy_engine,
                         state_manager,
-                        execution_engine) -> Dict:
+                        execution_engine,
+                        risk_engine=None) -> Dict:
         """
         Perform full system recovery after offline period.
         
@@ -86,6 +87,8 @@ class RecoveryEngine:
             self.logger.info("RECOVERY MODE: Starting system reconstruction")
             self.logger.info("=" * 60)
             
+            symbol_info = market_data_service.get_symbol_info()
+
             # Step 1: Load historical data
             self.logger.info(f"Step 1: Loading {self.recovery_bars} historical bars...")
             df = self._load_historical_data(market_data_service)
@@ -148,7 +151,9 @@ class RecoveryEngine:
                             exit_price,
                             exit_reason,
                             execution_engine,
-                            state_manager
+                            state_manager,
+                            symbol_info=symbol_info,
+                            risk_engine=risk_engine
                         )
                         
                         if closed:
@@ -362,7 +367,9 @@ class RecoveryEngine:
                        exit_price: float,
                        exit_reason: str,
                        execution_engine,
-                       state_manager) -> bool:
+                       state_manager,
+                       symbol_info: Optional[Dict] = None,
+                       risk_engine=None) -> bool:
         """
         Close a position during recovery.
         
@@ -388,7 +395,10 @@ class RecoveryEngine:
                 state_manager.close_position(
                     exit_price=exit_price,
                     exit_reason=exit_reason,
-                    ticket=position['ticket']
+                    ticket=position['ticket'],
+                    symbol_info=symbol_info,
+                    risk_engine=risk_engine,
+                    swap=position.get('swap', 0.0)
                 )
                 
                 self.logger.info(
@@ -403,7 +413,10 @@ class RecoveryEngine:
                 state_manager.close_position(
                     exit_price=exit_price,
                     exit_reason=f"{exit_reason} (execution failed, state updated)",
-                    ticket=position['ticket']
+                    ticket=position['ticket'],
+                    symbol_info=symbol_info,
+                    risk_engine=risk_engine,
+                    swap=position.get('swap', 0.0)
                 )
                 return False
                 
