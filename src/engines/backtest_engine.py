@@ -33,6 +33,7 @@ from .decision_engine import DecisionEngine, DecisionResult, DecisionOutput, Sta
 # Import market data service
 from .market_data_service import MarketDataService
 from .market_regime_engine import MarketRegimeEngine
+from .risk_engine import RiskEngine
 
 
 class ExitReason(Enum):
@@ -133,14 +134,23 @@ class BacktestEngine:
         self.logger.info(f"  Period: {rolling_days} days, Warmup: {warmup_bars} bars")
         self.logger.info(f"  Costs: Commission {commission_percent}%, Spread {spread_points}pt, Slippage {slippage_points}pt")
         
+        risk_config = config.get("risk", {}) if config else {}
+        self.risk_engine = RiskEngine(
+            risk_percent=risk_config.get("risk_percent", 1.0),
+            commission_per_lot=risk_config.get("commission_per_lot", 0.0),
+        )
         # Initialize unified decision engine
-        self.decision_engine = DecisionEngine(config if config else {})
+        self.decision_engine = DecisionEngine(
+            config if config else {},
+            risk_engine=self.risk_engine,
+        )
         self.logger.info("Unified DecisionEngine initialized")
         # Market Regime Engine (for context in backtest)
         self.market_regime_engine = MarketRegimeEngine()
         
         # Create internal MarketDataService (used if none provided to load_historical_data)
         self.market_data_service = None
+        self.symbol_info: Optional[Dict] = None
         
         # State
         self.df: Optional[pd.DataFrame] = None
@@ -191,6 +201,8 @@ class BacktestEngine:
             
             self.logger.info(f"   MarketDataService symbol: {market_data_service.symbol}")
             self.logger.info(f"   MarketDataService timeframe: {market_data_service.timeframe}")
+
+            self.symbol_info = market_data_service.get_symbol_info()
             
             # Fetch bars from market data service
             # Note: MarketDataService already has symbol and timeframe from init
@@ -378,7 +390,8 @@ class BacktestEngine:
                             df=df_with_indicators,
                             pattern=pattern,
                             account_state=account_state,
-                            direction="LONG"
+                            direction="LONG",
+                            symbol_info=self.symbol_info,
                         )
                         
                         # Update decision tracking with ALL new fields
