@@ -970,11 +970,14 @@ class TradingController(QObject):
     def _on_reconnect_status(self, message: str) -> None:
         """Handle reconnect status updates for UI/logging."""
         self.logger.info(f"Reconnect status: {message}")
+        lowered = message.lower()
+        if "successful" in lowered or "restored" in lowered:
+            self._resync_market_data()
+
         if self.window:
             self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': message})
 
             status = "RECONNECTING"
-            lowered = message.lower()
             if "successful" in lowered or "restored" in lowered:
                 status = "CONNECTED"
             elif "failed" in lowered or "cancel" in lowered or "timed out" in lowered:
@@ -2138,6 +2141,8 @@ class HeadlessTradingRunner:
             heartbeat_interval_seconds=30,
             max_heartbeat_failures=3,
         )
+        self.connection_manager.on_status_change = self._on_connection_status_change
+        self.connection_manager.on_reconnect_status = self._on_reconnect_status
         self.indicator_engine = IndicatorEngine()
         self.pattern_engine = PatternEngine(
             lookback_left=strategy_config.pivot_lookback_left,
@@ -2226,13 +2231,48 @@ class HeadlessTradingRunner:
             return
         self.last_heartbeat_check = now
         healthy = self.connection_manager.check_connection()
-        if not healthy and self.connection_manager.consecutive_failures >= self.connection_manager.max_failures:
+        if not healthy:
             if not self.trading_paused:
                 self.trading_paused = True
-                self.logger.error("Heartbeat failures exceeded threshold - trading paused.")
+                self.logger.error("Heartbeat failure detected - trading paused.")
+            mt5_config = self.app_config.mt5
+            started = self.connection_manager.request_reconnect_async(
+                login=mt5_config.login,
+                password=mt5_config.password,
+                server=mt5_config.server,
+                terminal_path=mt5_config.terminal_path,
+            )
+            if not started:
+                self.logger.debug("Reconnect request skipped (already in progress).")
         elif healthy and self.trading_paused:
             self.trading_paused = False
             self.logger.info("Heartbeat recovered - trading resumed.")
+
+    def _on_connection_status_change(self, is_connected: bool) -> None:
+        """Handle MT5 connection status updates in headless mode."""
+        if is_connected:
+            self.logger.info("MT5 connection restored (headless).")
+            self._resync_market_data()
+            self.trading_paused = False
+        else:
+            self.logger.error("MT5 connection lost (headless). Trading paused.")
+            self.trading_paused = True
+
+    def _on_reconnect_status(self, message: str) -> None:
+        """Log reconnect status updates in headless mode."""
+        self.logger.info("Reconnect status (headless): %s", message)
+
+    def _resync_market_data(self) -> None:
+        """Refetch bar history after reconnection."""
+        try:
+            bars_to_fetch = self.config.get("data.bars_to_fetch", 500)
+            df = self.market_data.get_bars(count=bars_to_fetch)
+            if df is None or df.empty:
+                self.logger.warning("Market data resync failed (headless, no bars returned).")
+                return
+            self.logger.info("Market data resynced (headless): %s bars.", len(df))
+        except Exception as exc:
+            self.logger.error("Market data resync error (headless): %s", exc, exc_info=True)
 
     def _process_bar_close(self) -> None:
         bars_to_fetch = self.config.get("data.bars_to_fetch", 500)

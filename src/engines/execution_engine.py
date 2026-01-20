@@ -229,6 +229,9 @@ class ExecutionEngine:
             True if closed successfully, False otherwise
         """
         try:
+            if not self._validate_connection_and_symbol():
+                return False
+
             # Get position info
             position = mt5.positions_get(ticket=ticket)
             if position is None or len(position) == 0:
@@ -236,22 +239,6 @@ class ExecutionEngine:
                 return False
             
             position = position[0]
-
-            symbol_info = mt5.symbol_info(self.symbol)
-            if symbol_info is None:
-                self.logger.error("Symbol info unavailable for %s (symbol not tradeable).", self.symbol)
-                return False
-
-            if not symbol_info.visible or not symbol_info.trade_allowed:
-                self.logger.warning(
-                    "Symbol %s not tradeable (visible=%s trade_allowed=%s). Attempting symbol_select.",
-                    self.symbol,
-                    symbol_info.visible,
-                    symbol_info.trade_allowed,
-                )
-                if not mt5.symbol_select(self.symbol, True):
-                    self.logger.error("Symbol %s not tradeable after symbol_select.", self.symbol)
-                    return False
 
             tick = mt5.symbol_info_tick(self.symbol)
             if tick is None:
@@ -281,9 +268,6 @@ class ExecutionEngine:
                         price,
                     )
 
-            if not self._validate_connection_and_symbol():
-                return False
-            
             # Prepare close request
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
