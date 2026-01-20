@@ -50,6 +50,31 @@ class ExecutionEngine:
         self.symbol = symbol
         self.magic_number = magic_number
         self.logger = logging.getLogger(__name__)
+
+    def _validate_connection_and_symbol(self) -> bool:
+        """Validate MT5 connection and symbol tradeability before sending orders."""
+        account_info = mt5.account_info()
+        if account_info is None:
+            self.logger.error("MT5 not connected (account_info is None).")
+            return False
+
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            self.logger.error("Symbol info unavailable for %s (symbol not found).", self.symbol)
+            return False
+
+        if not symbol_info.visible or not symbol_info.trade_allowed:
+            self.logger.warning(
+                "Symbol %s not tradeable (visible=%s trade_allowed=%s). Attempting symbol_select.",
+                self.symbol,
+                symbol_info.visible,
+                symbol_info.trade_allowed,
+            )
+            if not mt5.symbol_select(self.symbol, True):
+                self.logger.error("Symbol %s not tradeable after symbol_select.", self.symbol)
+                return False
+
+        return True
     
     def send_market_order(self,
                          order_type: str,
@@ -76,6 +101,9 @@ class ExecutionEngine:
             # Validate order type (LONG ONLY)
             if order_type != "BUY":
                 self.logger.error(f"Invalid order type: {order_type}. Strategy is LONG ONLY.")
+                return None
+
+            if not self._validate_connection_and_symbol():
                 return None
             
             # Get current price
@@ -252,6 +280,9 @@ class ExecutionEngine:
                         close_price,
                         price,
                     )
+
+            if not self._validate_connection_and_symbol():
+                return False
             
             # Prepare close request
             request = {
@@ -323,6 +354,10 @@ class ExecutionEngine:
             
             # Send modification
             self.logger.info(f"Modifying position {ticket}: SL={stop_loss}, TP={take_profit}")
+
+            if not self._validate_connection_and_symbol():
+                return False
+
             result = mt5.order_send(request)
             
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:

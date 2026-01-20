@@ -546,6 +546,7 @@ class TradingController(QObject):
             max_heartbeat_failures=3
         )
         self.connection_manager.on_status_change = self._on_connection_status_change
+        self.connection_manager.on_reconnect_status = self._on_reconnect_status
         
         # Timer for heartbeat checks
         self.heartbeat_timer = QTimer()
@@ -778,11 +779,12 @@ class TradingController(QObject):
         if self.window:
             self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "Trading started"})
     
-    def stop_trading(self):
+    def stop_trading(self, stop_heartbeat: bool = True):
         """Stop the trading loop."""
         self.is_running = False
         self.timer.stop()
-        self.heartbeat_timer.stop()  # Stop heartbeat
+        if stop_heartbeat:
+            self.heartbeat_timer.stop()  # Stop heartbeat
         self.health_check_timer.stop()  # Stop health checks
         self.logger.info("Trading stopped")
         
@@ -803,22 +805,17 @@ class TradingController(QObject):
             is_healthy = self.connection_manager.check_connection()
             
             if not is_healthy and self.is_running:
-                self.logger.warning("Connection unhealthy, attempting reconnect...")
-                
-                # Attempt reconnection
+                self.logger.warning("Connection unhealthy; pausing trading and requesting reconnect...")
+                self.stop_trading(stop_heartbeat=False)
                 mt5_config = self.app_config.mt5
-                success = self.connection_manager.reconnect(
+                started = self.connection_manager.request_reconnect_async(
                     login=mt5_config.login,
                     password=mt5_config.password,
                     server=mt5_config.server,
                     terminal_path=mt5_config.terminal_path,
                 )
-                
-                if success:
-                    self.logger.info("Reconnection successful")
-                else:
-                    self.logger.error("Reconnection failed")
-                    self.stop_trading()
+                if not started:
+                    self.logger.warning("Reconnect request was not started (already in progress)")
             
             # Update UI with connection status (thread-safe)
             if self.window:
@@ -913,6 +910,7 @@ class TradingController(QObject):
         3. Attempt automatic recovery
         4. Notify user with action items
         """
+        was_connected = self.is_connected
         self.is_connected = is_connected
         
         if not is_connected and self.is_running:
@@ -953,6 +951,8 @@ class TradingController(QObject):
         
         elif is_connected and not self.is_running:
             self.logger.info("✅ Connection restored - ready to resume trading")
+            if not was_connected:
+                self._resync_market_data()
             if self.window:
                 self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message':
                     "✅ MT5 CONNECTION RESTORED\n"
@@ -966,6 +966,42 @@ class TradingController(QObject):
                 'connected': is_connected,
                 'account_info': self.market_data.get_account_info() if is_connected else None
             })
+
+    def _on_reconnect_status(self, message: str) -> None:
+        """Handle reconnect status updates for UI/logging."""
+        self.logger.info(f"Reconnect status: {message}")
+        if self.window:
+            self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': message})
+
+            status = "RECONNECTING"
+            lowered = message.lower()
+            if "successful" in lowered or "restored" in lowered:
+                status = "CONNECTED"
+            elif "failed" in lowered or "cancel" in lowered or "timed out" in lowered:
+                status = "DISCONNECTED"
+
+            can_auto_trade_by_policy, _policy_reason = self.runtime_manager.can_auto_trade()
+            auto_trading_active = self.auto_trade_enabled and can_auto_trade_by_policy
+            runtime_context = {
+                'runtime_mode': self.runtime_manager.runtime_mode.value,
+                'auto_trading_enabled': auto_trading_active,
+                'account_type': self.runtime_manager.account_type.value if self.runtime_manager.account_type else 'UNKNOWN',
+                'mt5_connection_status': status,
+                'last_heartbeat': datetime.now().strftime('%H:%M:%S')
+            }
+            self.ui_queue.post_event(UIEventType.UPDATE_RUNTIME_CONTEXT, {'context': runtime_context})
+
+    def _resync_market_data(self) -> None:
+        """Refetch bar history after reconnection."""
+        try:
+            bars_to_fetch = self.config.get('data.bars_to_fetch', 500)
+            df = self.market_data.get_bars(count=bars_to_fetch)
+            if df is None or df.empty:
+                self.logger.warning("Market data resync failed (no bars returned)")
+                return
+            self.logger.info(f"Market data resynced ({len(df)} bars)")
+        except Exception as e:
+            self.logger.error(f"Market data resync error: {e}", exc_info=True)
     
     def _attempt_auto_recovery(self):
         """
