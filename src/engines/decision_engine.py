@@ -13,12 +13,15 @@ NO UNKNOWN STATES ARE ALLOWED.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, TYPE_CHECKING, Union
 from dataclasses import dataclass
 from enum import Enum
 import logging
 
 from .risk_engine import RiskEngine
+
+if TYPE_CHECKING:
+    from config import AppConfig
 
 
 class DecisionResult(Enum):
@@ -131,15 +134,21 @@ class DecisionEngine:
     - Same logic for live, backtest, and analysis
     """
     
-    def __init__(self, config: Dict, risk_engine: Optional[RiskEngine] = None):
+    def __init__(
+        self,
+        config: Union[Dict, "AppConfig"],
+        risk_engine: Optional[RiskEngine] = None,
+    ):
         """
         Initialize Decision Engine.
         
         Args:
-            config: Configuration dict with strategy and risk settings
+            config: Configuration dict or validated app configuration
             risk_engine: Optional RiskEngine instance for position sizing
         """
         self.logger = logging.getLogger(__name__)
+        if hasattr(config, "to_dict"):
+            config = config.to_dict()
         self.config = config
         
         # Extract strategy settings
