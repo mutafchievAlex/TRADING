@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
+from .risk_engine import RiskEngine
+
 
 class DecisionResult(Enum):
     """Possible decision outcomes."""
@@ -128,12 +130,13 @@ class DecisionEngine:
     - Same logic for live, backtest, and analysis
     """
     
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, risk_engine: Optional[RiskEngine] = None):
         """
         Initialize Decision Engine.
         
         Args:
             config: Configuration dict with strategy and risk settings
+            risk_engine: Optional RiskEngine instance for position sizing
         """
         self.logger = logging.getLogger(__name__)
         self.config = config
@@ -147,6 +150,10 @@ class DecisionEngine:
         self.cooldown_hours = config.get('strategy', {}).get('cooldown_hours', 5)
         self.pyramiding = config.get('strategy', {}).get('pyramiding', 3)
         self.risk_percent = config.get('risk', {}).get('risk_percent', 1.0)
+        self.risk_engine = risk_engine or RiskEngine(
+            risk_percent=self.risk_percent,
+            commission_per_lot=config.get('risk', {}).get('commission_per_lot', 0.0),
+        )
         
         # Optional quality gate threshold (if implemented)
         self.quality_score_threshold = config.get('strategy', {}).get('quality_score_threshold', None)
@@ -156,7 +163,8 @@ class DecisionEngine:
                  df: pd.DataFrame,
                  pattern: Optional[Dict],
                  account_state: Dict,
-                 direction: str = "LONG") -> DecisionOutput:
+                 direction: str = "LONG",
+                 symbol_info: Optional[Dict] = None) -> DecisionOutput:
         """
         Evaluate trading decision for a single bar.
         
@@ -281,7 +289,14 @@ class DecisionEngine:
         # ============================================================
         # STAGE 8: RISK_MODEL
         # ============================================================
-        result = self._check_risk_model(close, atr, pattern, account_state, direction)
+        result = self._check_risk_model(
+            close,
+            atr,
+            pattern,
+            account_state,
+            direction,
+            symbol_info,
+        )
         if result is not None:
             result = self._enrich_decision_output(result, bar_timestamp)
             result.pattern_data = pattern
@@ -299,7 +314,14 @@ class DecisionEngine:
             bar_timestamp = df.index[bar_index].strftime('%Y-%m-%d %H:%M') if hasattr(df.index[bar_index], 'strftime') else str(df.index[bar_index])
         
         # Calculate position preview
-        position_preview = self._calculate_position_preview(close, atr, pattern, account_state, direction)
+        position_preview = self._calculate_position_preview(
+            close,
+            atr,
+            pattern,
+            account_state,
+            direction,
+            symbol_info,
+        )
         
         # Calculate quality score
         quality_score, quality_breakdown = self._calculate_quality_score(pattern, indicators, direction)
@@ -590,7 +612,8 @@ class DecisionEngine:
         return None  # Pass
     
     def _calculate_position_preview(self, close: float, atr: float, pattern: Dict, 
-                                    account_state: Dict, direction: str) -> Dict:
+                                    account_state: Dict, direction: str,
+                                    symbol_info: Optional[Dict]) -> Dict:
         """
         Calculate position preview: SL, TP levels, risk $, RR.
         
@@ -598,7 +621,6 @@ class DecisionEngine:
             Dict with entry, sl, tp1-3, risk_usd, rr, position_size
         """
         equity = account_state.get('equity', 10000)  # Default for backtest
-        risk_amount = equity * (self.risk_percent / 100)
         
         # Calculate SL distance
         sl_distance = atr * self.atr_multiplier_stop
@@ -624,20 +646,29 @@ class DecisionEngine:
             tp2 = entry_price - (sl_distance * rr * 0.75)
             tp3 = entry_price - (sl_distance * rr)
         
-        # Calculate position size (simplified for gold)
-        # For XAUUSD: 0.01 lot = $0.01 per point
-        # Position size = risk_amount / (sl_distance / 0.01)
-        point_value = 0.01  # $0.01 per point per 0.01 lot
-        position_size = (risk_amount / sl_distance) * point_value
-        position_size = round(position_size, 2)  # Round to 2 decimals
-        
+        position_size = None
+        actual_risk = None
+        if self.risk_engine and symbol_info:
+            position_size = self.risk_engine.calculate_position_size(
+                equity=equity,
+                entry_price=entry_price,
+                stop_loss=sl_price,
+                symbol_info=symbol_info,
+            )
+            if position_size is not None:
+                contract_size = symbol_info.get('trade_contract_size', 100.0)
+                price_risk = abs(entry_price - sl_price)
+                actual_risk = (price_risk * position_size * contract_size) + (
+                    self.risk_engine.commission_per_lot * position_size * 2
+                )
+
         return {
             'entry': entry_price,
             'sl': sl_price,
             'tp1': tp1,
             'tp2': tp2,
             'tp3': tp3,
-            'risk_usd': risk_amount,
+            'risk_usd': actual_risk,
             'rr': rr,
             'position_size': position_size
         }
@@ -756,7 +787,8 @@ class DecisionEngine:
         return None  # Pass
     
     def _check_risk_model(self, close: float, atr: float, pattern: Dict, 
-                         account_state: Dict, direction: str) -> Optional[DecisionOutput]:
+                         account_state: Dict, direction: str,
+                         symbol_info: Optional[Dict]) -> Optional[DecisionOutput]:
         """
         Stage 8: Check risk model.
         
@@ -813,12 +845,6 @@ class DecisionEngine:
                 actual=f"equity = {equity:.2f}"
             )
         
-        risk_amount = equity * (self.risk_percent / 100)
-        
-        # Position size = risk_amount / sl_distance
-        # For gold, we need to consider point value ($0.01 per point per 0.01 lot)
-        # This is a simplified check - actual calculation in risk_engine
-        
         if sl_distance > close * 0.1:  # SL > 10% of price is too wide
             return DecisionOutput(
                 decision=DecisionResult.NO_TRADE,
@@ -827,6 +853,45 @@ class DecisionEngine:
                 reason=f"Stop loss too wide: {sl_distance:.2f} points ({sl_distance/close*100:.1f}%)",
                 required="sl_distance < 10% of price",
                 actual=f"sl_distance = {sl_distance:.2f} ({sl_distance/close*100:.1f}%)"
+            )
+
+        if not symbol_info:
+            return DecisionOutput(
+                decision=DecisionResult.NO_TRADE,
+                stage=Stage.RISK_MODEL,
+                fail_code=FailCode.RISK_MODEL_FAIL,
+                reason="Missing symbol info for position sizing",
+                required="symbol_info from MarketDataService",
+                actual="symbol_info = None"
+            )
+
+        if not self.risk_engine:
+            return DecisionOutput(
+                decision=DecisionResult.NO_TRADE,
+                stage=Stage.RISK_MODEL,
+                fail_code=FailCode.RISK_MODEL_FAIL,
+                reason="Risk engine unavailable for position sizing",
+                required="RiskEngine instance",
+                actual="risk_engine = None"
+            )
+
+        entry_price = close
+        stop_loss = entry_price - sl_distance if direction == "LONG" else entry_price + sl_distance
+        position_size = self.risk_engine.calculate_position_size(
+            equity=equity,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            symbol_info=symbol_info,
+        )
+
+        if position_size is None or position_size <= 0:
+            return DecisionOutput(
+                decision=DecisionResult.NO_TRADE,
+                stage=Stage.RISK_MODEL,
+                fail_code=FailCode.RISK_MODEL_FAIL,
+                reason="Position size calculation failed",
+                required="Valid position size",
+                actual=f"position_size = {position_size}"
             )
         
         return None  # Pass

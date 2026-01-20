@@ -2101,12 +2101,13 @@ class HeadlessTradingRunner:
             equality_tolerance=strategy_config.get("equality_tolerance", 2.0),
             min_bars_between=strategy_config.get("min_bars_between", 10),
         )
-        self.decision_engine = DecisionEngine(
-            {"strategy": strategy_config, "risk": risk_config}
-        )
         self.risk_engine = RiskEngine(
             risk_percent=risk_config.get("risk_percent", 1.0),
             commission_per_lot=risk_config.get("commission_per_lot", 0.0),
+        )
+        self.decision_engine = DecisionEngine(
+            {"strategy": strategy_config, "risk": risk_config},
+            risk_engine=self.risk_engine,
         )
         self.execution_engine = ExecutionEngine(
             symbol=mt5_config.get("symbol", "XAUUSD"),
@@ -2215,6 +2216,7 @@ class HeadlessTradingRunner:
 
         pattern = self.pattern_engine.detect_double_bottom(closed_df)
         account_info = self.market_data.get_account_info()
+        symbol_info = self.market_data.get_symbol_info()
         equity = account_info.get("equity") if account_info else 0.0
         account_state = {
             "equity": equity,
@@ -2227,6 +2229,7 @@ class HeadlessTradingRunner:
             pattern=pattern,
             account_state=account_state,
             direction="LONG",
+            symbol_info=symbol_info,
         )
         decision.decision_source = "Live"
 
@@ -2239,7 +2242,7 @@ class HeadlessTradingRunner:
             self.state_manager.save_state()
             return
 
-        symbol_info = self.market_data.get_symbol_info() or {}
+        symbol_info = symbol_info or {}
         entry_price = decision.planned_entry or float(current_bar["close"])
         stop_loss = decision.planned_sl
         take_profit = decision.planned_tp3
