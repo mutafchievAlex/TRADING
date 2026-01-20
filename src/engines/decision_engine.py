@@ -198,6 +198,7 @@ class DecisionEngine:
                 reason="Short trades are disabled (long-only mode).",
                 required="LONG direction only",
                 actual=f"{direction} requested",
+                decision_summary=f"NO_TRADE {direction.upper()}",
             )
         # Get current bar data (use -1 for last bar if index matches length)
         if bar_index < 0 or bar_index >= len(df):
@@ -242,7 +243,7 @@ class DecisionEngine:
         # ============================================================
         result = self._check_pattern_detection(pattern, direction)
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.indicators = indicators
             return result
         
@@ -251,7 +252,7 @@ class DecisionEngine:
         # ============================================================
         result = self._check_pattern_quality(pattern)
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.pattern_data = pattern
             result.indicators = indicators
             return result
@@ -261,7 +262,7 @@ class DecisionEngine:
         # ============================================================
         result = self._check_breakout_confirmation(close, pattern, direction)
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.pattern_data = pattern
             result.indicators = indicators
             return result
@@ -271,7 +272,7 @@ class DecisionEngine:
         # ============================================================
         result = self._check_trend_filter(close, ema50, ema200, direction)
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.indicators = indicators
             return result
         
@@ -281,7 +282,7 @@ class DecisionEngine:
         if self.enable_momentum_filter:
             result = self._check_momentum_filter(bar, atr)
             if result is not None:
-                result = self._enrich_decision_output(result, bar_timestamp)
+                result = self._enrich_decision_output(result, bar_timestamp, direction)
                 result.indicators = indicators
                 return result
         
@@ -291,7 +292,7 @@ class DecisionEngine:
         if self.quality_score_threshold is not None:
             result = self._check_quality_gate(pattern)
             if result is not None:
-                result = self._enrich_decision_output(result, bar_timestamp)
+                result = self._enrich_decision_output(result, bar_timestamp, direction)
                 result.pattern_data = pattern
                 result.indicators = indicators
                 return result
@@ -301,7 +302,7 @@ class DecisionEngine:
         # ============================================================
         result = self._check_execution_guards(bar_index, df, account_state)
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.indicators = indicators
             return result
         
@@ -317,7 +318,7 @@ class DecisionEngine:
             symbol_info,
         )
         if result is not None:
-            result = self._enrich_decision_output(result, bar_timestamp)
+            result = self._enrich_decision_output(result, bar_timestamp, direction)
             result.pattern_data = pattern
             result.indicators = indicators
             return result
@@ -373,7 +374,7 @@ class DecisionEngine:
             anti_fomo_passed=True
         )
     
-    def _enrich_decision_output(self, output: DecisionOutput, bar_timestamp: str) -> DecisionOutput:
+    def _enrich_decision_output(self, output: DecisionOutput, bar_timestamp: str, direction: str) -> DecisionOutput:
         """
         Enrich DecisionOutput with final decision state fields.
         
@@ -397,10 +398,11 @@ class DecisionEngine:
         
         # Set decision summary if not already set
         if output.decision_summary is None:
+            normalized_direction = direction.upper()
             if output.decision == DecisionResult.TRADE_ALLOWED:
-                output.decision_summary = "ENTER LONG"  # Simplified, would use direction param if passed
+                output.decision_summary = f"ENTER {normalized_direction}"
             else:
-                output.decision_summary = "NO_TRADE"
+                output.decision_summary = f"NO_TRADE {normalized_direction}"
         
         # Set last_closed_bar_time if not already set
         if output.last_closed_bar_time is None:
@@ -722,7 +724,7 @@ class DecisionEngine:
             pattern_score = 5.0
         breakdown['pattern'] = round(pattern_score, 1)
         
-        # 2. Regime Alignment (0-10) based on EMA relationships
+        # 2. EMA Alignment (0-10) based on EMA relationships
         close = indicators.get('close', 0)
         ema50 = indicators.get('ema50', 0)
         ema200 = indicators.get('ema200', 0)
@@ -737,30 +739,33 @@ class DecisionEngine:
             spread_pct = abs((ema50 - ema200) / ema200) * 100
             sep_score = min(spread_pct / 1.0, 1.0)  # 1% separation = max
             regime_score = (1.0 if aligned else 0.3) * 10 * (0.6 + 0.4 * sep_score)
-        breakdown['regime'] = round(regime_score, 1)
+        breakdown['ema'] = round(regime_score, 1)
         
         # 3. Momentum (0-10)
-        # Simplified - can be enhanced with volume data
+        # Use distance from EMA50 normalized by ATR as a proxy for impulse strength.
         atr = indicators.get('atr', 0)
-        if atr > 0:
-            momentum_score = min(atr / 5.0, 1.0) * 10  # Higher ATR = more momentum
+        if atr > 0 and ema50 > 0:
+            ema_distance = abs(close - ema50)
+            momentum_score = min((ema_distance / atr) / 2.0, 1.0) * 10
         else:
             momentum_score = 5.0
         breakdown['momentum'] = round(momentum_score, 1)
         
-        # 4. Momentum Alignment (0-10) — use ATR as proxy
-        if atr > 0:
-            momentum_score = min(atr / 5.0, 1.0) * 10
+        # 4. Volatility (0-10)
+        if atr > 0 and close > 0:
+            atr_pct = (atr / close) * 100
+            volatility_score = min(atr_pct / 2.0, 1.0) * 10  # 2% ATR = max
         else:
-            momentum_score = 5.0
-        breakdown['momentum'] = round(momentum_score, 1)
+            volatility_score = 5.0
+        breakdown['volatility'] = round(volatility_score, 1)
         
         # Overall score (weighted average)
-        # Contracted weights: pattern 0.3, regime 0.4, momentum 0.3
+        # Contracted weights: pattern 0.3, ema 0.35, momentum 0.2, volatility 0.15
         overall = (
             pattern_score * 0.3 +
-            regime_score * 0.4 +
-            momentum_score * 0.3
+            regime_score * 0.35 +
+            momentum_score * 0.2 +
+            volatility_score * 0.15
         )
         
         return round(overall, 1), breakdown
