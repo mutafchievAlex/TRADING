@@ -8,9 +8,12 @@ It ensures data is properly formatted and aligned with bar-close logic (no intra
 import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 import logging
 import time
+
+if TYPE_CHECKING:
+    from config import AppConfig
 
 
 class MarketDataService:
@@ -24,14 +27,23 @@ class MarketDataService:
     - Handle connection errors gracefully
     """
     
-    def __init__(self, symbol: str = "XAUUSD", timeframe: str = "H1"):
+    def __init__(
+        self,
+        symbol: str = "XAUUSD",
+        timeframe: str = "H1",
+        config: Optional["AppConfig"] = None,
+    ):
         """
         Initialize the Market Data Service.
         
         Args:
             symbol: Trading instrument (default: XAUUSD)
             timeframe: Chart timeframe (default: H1)
+            config: Optional validated app configuration
         """
+        if config is not None:
+            symbol = config.mt5.symbol
+            timeframe = config.mt5.timeframe
         self.symbol = symbol
         self.timeframe = self._parse_timeframe(timeframe)
         self.logger = logging.getLogger(__name__)

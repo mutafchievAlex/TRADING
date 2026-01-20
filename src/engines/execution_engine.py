@@ -10,8 +10,11 @@ This module handles all trade execution:
 
 import MetaTrader5 as mt5
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from config import AppConfig
 
 
 class ExecutionEngine:
@@ -27,14 +30,23 @@ class ExecutionEngine:
     Note: LONG ONLY strategy - only BUY orders
     """
     
-    def __init__(self, symbol: str = "XAUUSD", magic_number: int = 234000):
+    def __init__(
+        self,
+        symbol: str = "XAUUSD",
+        magic_number: int = 234000,
+        config: Optional["AppConfig"] = None,
+    ):
         """
         Initialize Execution Engine.
         
         Args:
             symbol: Trading symbol (default: XAUUSD)
             magic_number: Unique identifier for this strategy's orders
+            config: Optional validated app configuration
         """
+        if config is not None:
+            symbol = config.mt5.symbol
+            magic_number = config.mt5.magic_number
         self.symbol = symbol
         self.magic_number = magic_number
         self.logger = logging.getLogger(__name__)

@@ -9,7 +9,10 @@ This module implements strict risk management:
 
 import logging
 import math
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from config import AppConfig, RiskConfig
 
 
 class RiskEngine:
@@ -26,14 +29,27 @@ class RiskEngine:
     - Commissions are factored in
     """
     
-    def __init__(self, risk_percent: float = 1.0, commission_per_lot: float = 0.0):
+    def __init__(
+        self,
+        risk_percent: float = 1.0,
+        commission_per_lot: float = 0.0,
+        config: Optional["AppConfig"] = None,
+        risk_config: Optional["RiskConfig"] = None,
+    ):
         """
         Initialize Risk Engine.
         
         Args:
             risk_percent: Percentage of equity to risk per trade (default: 1.0%)
             commission_per_lot: Commission per lot in account currency (default: 0.0)
+            config: Optional validated app configuration
+            risk_config: Optional risk config override
         """
+        if config is not None:
+            risk_config = config.risk
+        if risk_config is not None:
+            risk_percent = risk_config.risk_percent
+            commission_per_lot = risk_config.commission_per_lot
         self.risk_percent = risk_percent
         self.commission_per_lot = commission_per_lot
         self.logger = logging.getLogger(__name__)

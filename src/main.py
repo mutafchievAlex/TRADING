@@ -463,7 +463,8 @@ from engines.recovery_engine import RecoveryEngine
 from engines.backtest_engine import BacktestEngine
 from engines.backtest_report_exporter import BacktestReportExporter
 from engines.market_regime_engine import MarketRegimeEngine
-from utils.config import load_config, Config
+from config import load_app_config
+from utils.config import load_config as load_legacy_config, Config
 from utils.logger import setup_logging
 from utils.runtime_mode_manager import RuntimeModeManager, get_runtime_manager
 from utils.ui_update_queue import UIUpdateQueue, UIEventType
@@ -488,7 +489,9 @@ class TradingController(QObject):
         super().__init__()
         
         # Load configuration
-        self.config = load_config()
+        config_path = os.getenv("TRADING_CONFIG", "config/config.yaml")
+        self.app_config = load_app_config(config_path)
+        self.config = load_legacy_config(config_path)
         
         # Set up logging
         log_config = self.config.get('logging', {})
@@ -503,18 +506,17 @@ class TradingController(QObject):
         self.logger.info("=" * 60)
         
         # Initialize Runtime Mode Manager
-        config_path = Path(__file__).parent.parent / "config" / "config.yaml"
-        self.runtime_manager = get_runtime_manager(config_path)
+        self.runtime_manager = get_runtime_manager(Path(config_path))
         
         # Initialize engines
         self._initialize_engines()
 
         # Backtest components
         backtest_cfg = self.config.get('backtest', {})
-        mt5_cfg = self.config.get_mt5_config()
+        mt5_cfg = self.app_config.mt5
         self.backtest_engine = BacktestEngine(
-            symbol=mt5_cfg.get('symbol', 'XAUUSD'),
-            timeframe=mt5_cfg.get('timeframe', 'H1'),
+            symbol=mt5_cfg.symbol,
+            timeframe=mt5_cfg.timeframe,
             rolling_days=backtest_cfg.get('rolling_days', 30),
             warmup_bars=backtest_cfg.get('warmup_bars', 300),
             commission_percent=backtest_cfg.get('commission_percent', 0.02),
@@ -585,46 +587,50 @@ class TradingController(QObject):
     def _initialize_engines(self):
         """Initialize all trading engines."""
         try:
+            app_config = self.app_config
             # Market data service
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = app_config.mt5
             self.market_data = MarketDataService(
-                symbol=mt5_config.get('symbol', 'XAUUSD'),
-                timeframe=mt5_config.get('timeframe', 'H1')
+                config=app_config,
+                symbol=mt5_config.symbol,
+                timeframe=mt5_config.timeframe,
             )
             
             # Indicator engine
             self.indicator_engine = IndicatorEngine()
             
             # Pattern engine
-            strategy_config = self.config.get_strategy_config()
+            strategy_config = app_config.strategy
             self.pattern_engine = PatternEngine(
-                lookback_left=strategy_config.get('pivot_lookback_left', 5),
-                lookback_right=strategy_config.get('pivot_lookback_right', 5),
-                equality_tolerance=strategy_config.get('equality_tolerance', 2.0),
-                min_bars_between=strategy_config.get('min_bars_between', 10)
+                lookback_left=strategy_config.pivot_lookback_left,
+                lookback_right=strategy_config.pivot_lookback_right,
+                equality_tolerance=strategy_config.equality_tolerance,
+                min_bars_between=strategy_config.min_bars_between,
             )
             
             # Strategy engine
             self.strategy_engine = StrategyEngine(
-                atr_multiplier_stop=strategy_config.get('atr_multiplier_stop', 2.0),
-                risk_reward_ratio_long=strategy_config.get('risk_reward_ratio_long', 2.0),
-                risk_reward_ratio_short=strategy_config.get('risk_reward_ratio_short', 2.0),
-                momentum_atr_threshold=strategy_config.get('momentum_atr_threshold', 0.5),
-                enable_momentum_filter=strategy_config.get('enable_momentum_filter', True),
-                cooldown_hours=strategy_config.get('cooldown_hours', 24)
+                atr_multiplier_stop=strategy_config.atr_multiplier_stop,
+                risk_reward_ratio_long=strategy_config.risk_reward_ratio_long,
+                risk_reward_ratio_short=strategy_config.risk_reward_ratio_short,
+                momentum_atr_threshold=strategy_config.momentum_atr_threshold,
+                enable_momentum_filter=strategy_config.enable_momentum_filter,
+                cooldown_hours=strategy_config.cooldown_hours,
             )
             
             # Risk engine
-            risk_config = self.config.get_risk_config()
+            risk_config = app_config.risk
             self.risk_engine = RiskEngine(
-                risk_percent=risk_config.get('risk_percent', 1.0),
-                commission_per_lot=risk_config.get('commission_per_lot', 0.0)
+                config=app_config,
+                risk_percent=risk_config.risk_percent,
+                commission_per_lot=risk_config.commission_per_lot,
             )
             
             # Execution engine
             self.execution_engine = ExecutionEngine(
-                symbol=mt5_config.get('symbol', 'XAUUSD'),
-                magic_number=mt5_config.get('magic_number', 234000)
+                config=app_config,
+                symbol=mt5_config.symbol,
+                magic_number=mt5_config.magic_number,
             )
             
             # State manager (with atomic writes for thread-safe persistence)
@@ -656,19 +662,19 @@ class TradingController(QObject):
     def connect_mt5(self) -> bool:
         """Connect to MetaTrader 5."""
         try:
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = self.app_config.mt5
             
             self.logger.info(f"Attempting MT5 connection with config:")
-            self.logger.info(f"  Terminal path: {mt5_config.get('terminal_path')}")
-            self.logger.info(f"  Login: {mt5_config.get('login')}")
-            self.logger.info(f"  Server: {mt5_config.get('server')}")
-            self.logger.info(f"  Symbol: {mt5_config.get('symbol')}")
+            self.logger.info(f"  Terminal path: {mt5_config.terminal_path}")
+            self.logger.info(f"  Login: {mt5_config.login}")
+            self.logger.info(f"  Server: {mt5_config.server}")
+            self.logger.info(f"  Symbol: {mt5_config.symbol}")
             
             connected = self.market_data.connect(
-                login=mt5_config.get('login'),
-                password=mt5_config.get('password'),
-                server=mt5_config.get('server'),
-                terminal_path=mt5_config.get('terminal_path')
+                login=mt5_config.login,
+                password=mt5_config.password,
+                server=mt5_config.server,
+                terminal_path=mt5_config.terminal_path,
             )
             
             if connected:
@@ -800,12 +806,12 @@ class TradingController(QObject):
                 self.logger.warning("Connection unhealthy, attempting reconnect...")
                 
                 # Attempt reconnection
-                mt5_config = self.config.get_mt5_config()
+                mt5_config = self.app_config.mt5
                 success = self.connection_manager.reconnect(
-                    login=mt5_config.get('login'),
-                    password=mt5_config.get('password'),
-                    server=mt5_config.get('server'),
-                    terminal_path=mt5_config.get('terminal_path')
+                    login=mt5_config.login,
+                    password=mt5_config.password,
+                    server=mt5_config.server,
+                    terminal_path=mt5_config.terminal_path,
                 )
                 
                 if success:
@@ -970,7 +976,7 @@ class TradingController(QObject):
         """
         try:
             self.logger.info("Starting connection recovery attempt...")
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = self.app_config.mt5
             
             # Try up to 3 times with delays
             for attempt in range(1, 4):
@@ -978,10 +984,10 @@ class TradingController(QObject):
                 time.sleep(3 * attempt)  # Exponential backoff
                 
                 success = self.connection_manager.reconnect(
-                    login=mt5_config.get('login'),
-                    password=mt5_config.get('password'),
-                    server=mt5_config.get('server'),
-                    terminal_path=mt5_config.get('terminal_path')
+                    login=mt5_config.login,
+                    password=mt5_config.password,
+                    server=mt5_config.server,
+                    terminal_path=mt5_config.terminal_path,
                 )
                 
                 if success:
@@ -1805,10 +1811,10 @@ class TradingController(QObject):
             result = bt_ui.last_result
             
             # Create exporter
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = self.app_config.mt5
             exporter = BacktestReportExporter(
-                symbol=mt5_config.get('symbol', 'XAUUSD'),
-                timeframe=mt5_config.get('timeframe', 'H1')
+                symbol=mt5_config.symbol,
+                timeframe=mt5_config.timeframe,
             )
             
             # Export JSON
@@ -1816,7 +1822,7 @@ class TradingController(QObject):
                 summary=result.get('summary', {}),
                 metrics=result.get('metrics', {}),
                 trades_df=result.get('trades_df'),
-                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+                settings=self.app_config.strategy.to_dict()
             )
             
             if filepath:
@@ -1846,16 +1852,16 @@ class TradingController(QObject):
             result = bt_ui.last_result
             
             # Create exporter
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = self.app_config.mt5
             exporter = BacktestReportExporter(
-                symbol=mt5_config.get('symbol', 'XAUUSD'),
-                timeframe=mt5_config.get('timeframe', 'H1')
+                symbol=mt5_config.symbol,
+                timeframe=mt5_config.timeframe,
             )
             
             # Export CSV
             filepath = exporter.export_csv(
                 trades_df=result.get('trades_df'),
-                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+                settings=self.app_config.strategy.to_dict()
             )
             
             if filepath:
@@ -1885,10 +1891,10 @@ class TradingController(QObject):
             result = bt_ui.last_result
             
             # Create exporter
-            mt5_config = self.config.get_mt5_config()
+            mt5_config = self.app_config.mt5
             exporter = BacktestReportExporter(
-                symbol=mt5_config.get('symbol', 'XAUUSD'),
-                timeframe=mt5_config.get('timeframe', 'H1')
+                symbol=mt5_config.symbol,
+                timeframe=mt5_config.timeframe,
             )
             
             # Export HTML
@@ -1897,7 +1903,7 @@ class TradingController(QObject):
                 metrics=result.get('metrics', {}),
                 trades_df=result.get('trades_df'),
                 equity_curve=result.get('equity_curve', []),
-                settings=self.config.get_strategy_config() if hasattr(self.config, "get_strategy_config") else {}
+                settings=self.app_config.strategy.to_dict()
             )
             
             if filepath:
@@ -2074,6 +2080,7 @@ class HeadlessTradingRunner:
     def __init__(self, config_path: str, poll_interval_seconds: float = 5.0):
         self.logger = logging.getLogger(__name__)
         self.config = self._load_runtime_config(config_path)
+        self.app_config = load_app_config(config_path)
         log_config = self.config.get("logging", {})
         self.trading_logger = setup_logging(
             log_dir=log_config.get("log_dir", "logs"),
@@ -2082,13 +2089,14 @@ class HeadlessTradingRunner:
         self.logger = self.trading_logger.get_main_logger()
         self.poll_interval_seconds = max(1.0, poll_interval_seconds)
 
-        mt5_config = self.config.get_mt5_config()
-        strategy_config = self.config.get_strategy_config()
-        risk_config = self.config.get_risk_config()
+        mt5_config = self.app_config.mt5
+        strategy_config = self.app_config.strategy
+        risk_config = self.app_config.risk
 
         self.market_data = MarketDataService(
-            symbol=mt5_config.get("symbol", "XAUUSD"),
-            timeframe=mt5_config.get("timeframe", "H1"),
+            config=self.app_config,
+            symbol=mt5_config.symbol,
+            timeframe=mt5_config.timeframe,
         )
         self.connection_manager = MT5ConnectionManager(
             heartbeat_interval_seconds=30,
@@ -2096,22 +2104,24 @@ class HeadlessTradingRunner:
         )
         self.indicator_engine = IndicatorEngine()
         self.pattern_engine = PatternEngine(
-            lookback_left=strategy_config.get("pivot_lookback_left", 5),
-            lookback_right=strategy_config.get("pivot_lookback_right", 5),
-            equality_tolerance=strategy_config.get("equality_tolerance", 2.0),
-            min_bars_between=strategy_config.get("min_bars_between", 10),
+            lookback_left=strategy_config.pivot_lookback_left,
+            lookback_right=strategy_config.pivot_lookback_right,
+            equality_tolerance=strategy_config.equality_tolerance,
+            min_bars_between=strategy_config.min_bars_between,
         )
         self.risk_engine = RiskEngine(
-            risk_percent=risk_config.get("risk_percent", 1.0),
-            commission_per_lot=risk_config.get("commission_per_lot", 0.0),
+            config=self.app_config,
+            risk_percent=risk_config.risk_percent,
+            commission_per_lot=risk_config.commission_per_lot,
         )
         self.decision_engine = DecisionEngine(
-            {"strategy": strategy_config, "risk": risk_config},
+            self.app_config,
             risk_engine=self.risk_engine,
         )
         self.execution_engine = ExecutionEngine(
-            symbol=mt5_config.get("symbol", "XAUUSD"),
-            magic_number=mt5_config.get("magic_number", 234000),
+            config=self.app_config,
+            symbol=mt5_config.symbol,
+            magic_number=mt5_config.magic_number,
         )
         self.state_manager = StateManager(
             state_file=self.config.get("data.state_file", "data/state.json"),
@@ -2127,7 +2137,7 @@ class HeadlessTradingRunner:
         self.last_heartbeat_check: float = 0.0
 
     def _load_runtime_config(self, config_path: str) -> Config:
-        config = Config(config_path)
+        config = load_legacy_config(config_path)
         self._validate_runtime_config(config)
         return config
 
@@ -2157,12 +2167,12 @@ class HeadlessTradingRunner:
             config.set("mt5.timeframe", "H1")
 
     def connect_mt5(self) -> bool:
-        mt5_config = self.config.get_mt5_config()
+        mt5_config = self.app_config.mt5
         connected = self.market_data.connect(
-            login=mt5_config.get("login"),
-            password=mt5_config.get("password"),
-            server=mt5_config.get("server"),
-            terminal_path=mt5_config.get("terminal_path"),
+            login=mt5_config.login,
+            password=mt5_config.password,
+            server=mt5_config.server,
+            terminal_path=mt5_config.terminal_path,
         )
         self.connection_manager.set_connection_status(connected)
         if connected:
