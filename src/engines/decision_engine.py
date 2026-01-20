@@ -49,6 +49,7 @@ class FailCode(Enum):
     QUALITY_SCORE_TOO_LOW = "QUALITY_SCORE_TOO_LOW"
     EXECUTION_GUARD_BLOCK = "EXECUTION_GUARD_BLOCK"
     RISK_MODEL_FAIL = "RISK_MODEL_FAIL"
+    SHORT_NOT_SUPPORTED = "SHORT_NOT_SUPPORTED"
 
 
 @dataclass
@@ -180,6 +181,15 @@ class DecisionEngine:
         Returns:
             DecisionOutput with decision, stage, fail_code, reason
         """
+        if direction.upper() == "SHORT":
+            return DecisionOutput(
+                decision=DecisionResult.NO_TRADE,
+                stage=Stage.EXECUTION_GUARDS,
+                fail_code=FailCode.SHORT_NOT_SUPPORTED,
+                reason="Short trades are disabled (long-only mode).",
+                required="LONG direction only",
+                actual=f"{direction} requested",
+            )
         # Get current bar data (use -1 for last bar if index matches length)
         if bar_index < 0 or bar_index >= len(df):
             # If bar_index is out of range, use last bar
