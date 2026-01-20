@@ -434,6 +434,9 @@ This module coordinates all components of the trading system:
 - Implements the main trading loop
 """
 
+import argparse
+import os
+import signal
 import sys
 import logging
 import time
@@ -451,6 +454,7 @@ from engines.market_data_service import MarketDataService
 from engines.indicator_engine import IndicatorEngine
 from engines.pattern_engine import PatternEngine
 from engines.strategy_engine import StrategyEngine
+from engines.decision_engine import DecisionEngine, DecisionResult
 from engines.risk_engine import RiskEngine
 from engines.execution_engine import ExecutionEngine
 from engines.state_manager import StateManager
@@ -459,7 +463,7 @@ from engines.recovery_engine import RecoveryEngine
 from engines.backtest_engine import BacktestEngine
 from engines.backtest_report_exporter import BacktestReportExporter
 from engines.market_regime_engine import MarketRegimeEngine
-from utils.config import load_config
+from utils.config import load_config, Config
 from utils.logger import setup_logging
 from utils.runtime_mode_manager import RuntimeModeManager, get_runtime_manager
 from utils.ui_update_queue import UIUpdateQueue, UIEventType
@@ -2062,8 +2066,306 @@ class TradingController(QObject):
 
 
 
+class HeadlessTradingRunner:
+    """Headless trading entrypoint that executes a bar-close loop."""
+
+    _VALID_TIMEFRAMES = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"}
+
+    def __init__(self, config_path: str, poll_interval_seconds: float = 5.0):
+        self.logger = logging.getLogger(__name__)
+        self.config = self._load_runtime_config(config_path)
+        log_config = self.config.get("logging", {})
+        self.trading_logger = setup_logging(
+            log_dir=log_config.get("log_dir", "logs"),
+            log_level=log_config.get("log_level", "INFO"),
+        )
+        self.logger = self.trading_logger.get_main_logger()
+        self.poll_interval_seconds = max(1.0, poll_interval_seconds)
+
+        mt5_config = self.config.get_mt5_config()
+        strategy_config = self.config.get_strategy_config()
+        risk_config = self.config.get_risk_config()
+
+        self.market_data = MarketDataService(
+            symbol=mt5_config.get("symbol", "XAUUSD"),
+            timeframe=mt5_config.get("timeframe", "H1"),
+        )
+        self.connection_manager = MT5ConnectionManager(
+            heartbeat_interval_seconds=30,
+            max_heartbeat_failures=3,
+        )
+        self.indicator_engine = IndicatorEngine()
+        self.pattern_engine = PatternEngine(
+            lookback_left=strategy_config.get("pivot_lookback_left", 5),
+            lookback_right=strategy_config.get("pivot_lookback_right", 5),
+            equality_tolerance=strategy_config.get("equality_tolerance", 2.0),
+            min_bars_between=strategy_config.get("min_bars_between", 10),
+        )
+        self.decision_engine = DecisionEngine(
+            {"strategy": strategy_config, "risk": risk_config}
+        )
+        self.risk_engine = RiskEngine(
+            risk_percent=risk_config.get("risk_percent", 1.0),
+            commission_per_lot=risk_config.get("commission_per_lot", 0.0),
+        )
+        self.execution_engine = ExecutionEngine(
+            symbol=mt5_config.get("symbol", "XAUUSD"),
+            magic_number=mt5_config.get("magic_number", 234000),
+        )
+        self.state_manager = StateManager(
+            state_file=self.config.get("data.state_file", "data/state.json"),
+            backup_dir=self.config.get("data.backup_dir", "data/backups"),
+            use_atomic_writes=True,
+        )
+
+        self.last_closed_bar_time: Optional[datetime] = None
+        self.last_trade_bar_index: int = -9999
+        self.bar_counter: int = 0
+        self.is_running = False
+        self.trading_paused = False
+        self.last_heartbeat_check: float = 0.0
+
+    def _load_runtime_config(self, config_path: str) -> Config:
+        config = Config(config_path)
+        self._validate_runtime_config(config)
+        return config
+
+    def _validate_runtime_config(self, config: Config) -> None:
+        risk_percent = config.get("risk.risk_percent", 1.0)
+        if not isinstance(risk_percent, (int, float)) or not (0 < risk_percent <= 100):
+            self.logger.warning(
+                "Invalid risk.risk_percent=%s; using default 1.0.",
+                risk_percent,
+            )
+            config.set("risk.risk_percent", 1.0)
+
+        pyramiding = config.get("strategy.pyramiding", 1)
+        if not isinstance(pyramiding, int) or pyramiding < 1:
+            self.logger.warning(
+                "Invalid strategy.pyramiding=%s; using default 1.",
+                pyramiding,
+            )
+            config.set("strategy.pyramiding", 1)
+
+        timeframe = config.get("mt5.timeframe", "H1")
+        if timeframe not in self._VALID_TIMEFRAMES:
+            self.logger.warning(
+                "Invalid mt5.timeframe=%s; using default H1.",
+                timeframe,
+            )
+            config.set("mt5.timeframe", "H1")
+
+    def connect_mt5(self) -> bool:
+        mt5_config = self.config.get_mt5_config()
+        connected = self.market_data.connect(
+            login=mt5_config.get("login"),
+            password=mt5_config.get("password"),
+            server=mt5_config.get("server"),
+            terminal_path=mt5_config.get("terminal_path"),
+        )
+        self.connection_manager.set_connection_status(connected)
+        if connected:
+            self.logger.info("Connected to MT5 for headless trading.")
+        else:
+            self.logger.error("Failed to connect to MT5 for headless trading.")
+        return connected
+
+    def request_shutdown(self) -> None:
+        self.is_running = False
+
+    def _perform_heartbeat(self) -> None:
+        now = time.time()
+        if now - self.last_heartbeat_check < 30:
+            return
+        self.last_heartbeat_check = now
+        healthy = self.connection_manager.check_connection()
+        if not healthy and self.connection_manager.consecutive_failures >= self.connection_manager.max_failures:
+            if not self.trading_paused:
+                self.trading_paused = True
+                self.logger.error("Heartbeat failures exceeded threshold - trading paused.")
+        elif healthy and self.trading_paused:
+            self.trading_paused = False
+            self.logger.info("Heartbeat recovered - trading resumed.")
+
+    def _process_bar_close(self) -> None:
+        bars_to_fetch = self.config.get("data.bars_to_fetch", 500)
+        df = self.market_data.get_bars(count=bars_to_fetch)
+        if df is None or df.empty:
+            self.logger.warning("No bars fetched; skipping bar-close processing.")
+            return
+
+        df = df.copy()
+        if "time" in df.columns:
+            df = df.set_index("time")
+
+        df = self.indicator_engine.calculate_all_indicators(df)
+        if len(df) < 3:
+            self.logger.warning("Not enough data for indicators; waiting for more bars.")
+            return
+
+        closed_df = df.iloc[:-1]
+        current_bar = closed_df.iloc[-1]
+        bar_time = closed_df.index[-1]
+
+        if self.last_closed_bar_time == bar_time:
+            return
+
+        self.last_closed_bar_time = bar_time
+        self.bar_counter += 1
+
+        pattern = self.pattern_engine.detect_double_bottom(closed_df)
+        account_info = self.market_data.get_account_info()
+        equity = account_info.get("equity") if account_info else 0.0
+        account_state = {
+            "equity": equity,
+            "open_positions": len(self.state_manager.open_positions),
+            "last_trade_bar": self.last_trade_bar_index,
+        }
+        decision = self.decision_engine.evaluate(
+            bar_index=len(closed_df) - 1,
+            df=closed_df,
+            pattern=pattern,
+            account_state=account_state,
+            direction="LONG",
+        )
+        decision.decision_source = "Live"
+
+        if decision.decision != DecisionResult.TRADE_ALLOWED:
+            self.logger.info(
+                "Decision: %s (%s)",
+                decision.decision.value,
+                decision.reason or "No trade",
+            )
+            self.state_manager.save_state()
+            return
+
+        symbol_info = self.market_data.get_symbol_info() or {}
+        entry_price = decision.planned_entry or float(current_bar["close"])
+        stop_loss = decision.planned_sl
+        take_profit = decision.planned_tp3
+
+        if stop_loss is None:
+            atr = float(current_bar.get("atr14", 0.0))
+            stop_loss = entry_price - (atr * self.decision_engine.atr_multiplier_stop)
+
+        volume = self.risk_engine.calculate_position_size(
+            equity=equity,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            symbol_info=symbol_info,
+        )
+        if volume is None:
+            self.logger.warning("Position sizing failed; skipping execution.")
+            return
+
+        order = self.execution_engine.send_market_order(
+            order_type="BUY",
+            volume=volume,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            comment="DecisionEngine Bar-Close",
+        )
+        if order:
+            self.last_trade_bar_index = self.bar_counter
+            self.state_manager.open_position(
+                {
+                    "ticket": order["order"],
+                    "entry_price": order["price"],
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "volume": volume,
+                    "entry_time": order.get("timestamp", datetime.now()),
+                    "pattern_info": pattern,
+                    "atr": float(current_bar.get("atr14", 0.0)),
+                }
+            )
+            self.logger.info(
+                "Order executed: ticket=%s volume=%.2f entry=%.2f",
+                order["order"],
+                volume,
+                order["price"],
+            )
+        else:
+            self.logger.warning("Order execution failed; no state persisted for entry.")
+
+        self.state_manager.save_state()
+
+    def run(self) -> None:
+        if not self.connect_mt5():
+            self.logger.error("Headless trading aborted: MT5 connection failed.")
+            return
+
+        self.is_running = True
+        self.logger.info("Headless trading loop started.")
+        try:
+            while self.is_running:
+                self._perform_heartbeat()
+                if not self.trading_paused:
+                    self._process_bar_close()
+                time.sleep(self.poll_interval_seconds)
+        finally:
+            self.shutdown()
+
+    def shutdown(self) -> None:
+        self.logger.info("Headless trading shutdown initiated.")
+        try:
+            if self.connection_manager.reconnect_in_progress:
+                self.connection_manager.cancel_reconnect()
+        except Exception as exc:
+            self.logger.warning("Reconnect cancel failed: %s", exc)
+
+        try:
+            self.state_manager.shutdown()
+        except Exception as exc:
+            self.logger.warning("State manager shutdown failed: %s", exc)
+
+        try:
+            self.market_data.disconnect()
+        except Exception as exc:
+            self.logger.warning("MT5 disconnect failed: %s", exc)
+
+        self.logger.info("Headless trading shutdown complete.")
+
+
+def _configure_headless_signals(runner: HeadlessTradingRunner) -> None:
+    def _handler(signum, _frame):
+        runner.logger.info("Signal %s received; shutting down.", signum)
+        runner.request_shutdown()
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+
 def main():
     """Main application entry point."""
+    parser = argparse.ArgumentParser(description="XAUUSD Trading System")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without UI using the bar-close trading loop.",
+    )
+    parser.add_argument(
+        "--config",
+        default=os.getenv("TRADING_CONFIG", "config/config.yaml"),
+        help="Path to configuration file (YAML or JSON).",
+    )
+    parser.add_argument(
+        "--poll",
+        type=float,
+        default=5.0,
+        help="Polling interval in seconds for bar-close checks.",
+    )
+    args = parser.parse_args()
+
+    if args.headless or os.getenv("TRADING_HEADLESS") == "1":
+        runner = HeadlessTradingRunner(
+            config_path=args.config,
+            poll_interval_seconds=args.poll,
+        )
+        _configure_headless_signals(runner)
+        runner.run()
+        return
+
     app = QApplication(sys.argv)
     
     # Create controller
