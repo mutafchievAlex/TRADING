@@ -534,6 +534,8 @@ class TradingController(QObject):
         self.is_connected = False
         self.auto_trade_enabled = False  # User's auto trade checkbox state
         self.app_start_time = datetime.now()
+        self.qc_failure_count = 0
+        self.qc_next_retry_at = 0.0
         
         # Timer for main loop
         self.timer = QTimer()
@@ -1141,6 +1143,15 @@ class TradingController(QObject):
         try:
             if not self.is_running or not self.is_connected:
                 return
+
+            now = time.time()
+            if self.qc_next_retry_at and now < self.qc_next_retry_at:
+                self.logger.debug(
+                    "Skipping loop due to QC backoff (retry at %.1f, now %.1f)",
+                    self.qc_next_retry_at,
+                    now,
+                )
+                return
             
             # Start main loop timer for performance monitoring
             loop_timer = f"main_loop_{int(time.time() * 1000) % 100000}"
@@ -1151,15 +1162,20 @@ class TradingController(QObject):
             # 1. Fetch market data
             data_timer = f"market_data_fetch_{int(time.time() * 1000) % 100000}"
             self.performance_monitor.start_timer(data_timer)
-            df = self.market_data.get_bars(count=self.config.get('data.bars_to_fetch', 500))
+            df = self.market_data.get_bars_with_qc(count=self.config.get('data.bars_to_fetch', 500))
             self.performance_monitor.end_timer(data_timer, OperationType.MARKET_DATA_FETCH)
             
             if df is None:
-                self.logger.warning("Failed to fetch market data from MT5")
+                self._handle_qc_failure(self.market_data.last_qc_failure_reason)
                 return
             if len(df) < 220:
                 self.logger.warning(f"Insufficient market data: {len(df)} bars (need 220+)")
                 return
+
+            if self.qc_failure_count:
+                self.logger.info("QC recovered after %d failures", self.qc_failure_count)
+            self.qc_failure_count = 0
+            self.qc_next_retry_at = 0.0
             
             # 2. Calculate indicators
             df = self.indicator_engine.calculate_all_indicators(df)
@@ -1189,6 +1205,24 @@ class TradingController(QObject):
             
         except Exception as e:
             self.logger.error(f"Error in main loop: {e}", exc_info=True)
+
+    def _handle_qc_failure(self, reason: Optional[str]) -> None:
+        """Apply backoff behavior when QC fails."""
+        self.qc_failure_count += 1
+        capped_exp = min(self.qc_failure_count, 5)
+        backoff_seconds = min(60.0, float(2 ** capped_exp))
+        self.qc_next_retry_at = time.time() + backoff_seconds
+        reason_text = reason or "QC failure during market data fetch"
+        self.logger.warning(
+            "QC failure #%d: %s. Backing off for %.1f seconds.",
+            self.qc_failure_count,
+            reason_text,
+            backoff_seconds,
+        )
+        if self.window:
+            self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
+                'message': f"QC failure: {reason_text}. Backoff {backoff_seconds:.1f}s"
+            })
     
     def _check_entry(self, df, pattern, current_bar):
         """Check for entry signal and execute trade if conditions met."""

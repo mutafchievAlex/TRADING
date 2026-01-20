@@ -48,6 +48,9 @@ class MarketDataService:
         self.timeframe = self._parse_timeframe(timeframe)
         self.logger = logging.getLogger(__name__)
         self.is_connected = False
+        self.qc_failures = 0
+        self.qc_failure_reasons = {}
+        self.last_qc_failure_reason = None
         
     def _parse_timeframe(self, tf_string: str) -> int:
         """
@@ -221,6 +224,74 @@ class MarketDataService:
         except Exception as e:
             self.logger.error(f"Error fetching bars: {e}")
             return None
+
+    def _timeframe_seconds(self) -> Optional[int]:
+        """Return expected bar duration in seconds for current timeframe."""
+        timeframe_seconds = {
+            mt5.TIMEFRAME_M1: 60,
+            mt5.TIMEFRAME_M5: 5 * 60,
+            mt5.TIMEFRAME_M15: 15 * 60,
+            mt5.TIMEFRAME_M30: 30 * 60,
+            mt5.TIMEFRAME_H1: 60 * 60,
+            mt5.TIMEFRAME_H4: 4 * 60 * 60,
+            mt5.TIMEFRAME_D1: 24 * 60 * 60,
+            mt5.TIMEFRAME_W1: 7 * 24 * 60 * 60,
+            mt5.TIMEFRAME_MN1: 30 * 24 * 60 * 60,
+        }
+        return timeframe_seconds.get(self.timeframe)
+
+    def qc_check_bars(self, df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+        """
+        Quality-control checks for bar data integrity.
+
+        Checks:
+        - Monotonic timestamps
+        - Missing/duplicate bars
+        - Time gaps larger than expected bar size
+        """
+        if df is None or df.empty:
+            return self._record_qc_failure("QC failed: empty or missing data frame")
+
+        if "time" not in df.columns:
+            return self._record_qc_failure("QC failed: missing 'time' column in bars")
+
+        times = pd.to_datetime(df["time"], errors="coerce")
+        if times.isna().any():
+            return self._record_qc_failure("QC failed: non-parseable timestamps detected")
+
+        if not times.is_monotonic_increasing:
+            return self._record_qc_failure("QC failed: timestamps are not monotonic increasing")
+
+        if times.duplicated().any():
+            dup_count = int(times.duplicated().sum())
+            return self._record_qc_failure(f"QC failed: detected {dup_count} duplicate bar timestamps")
+
+        expected_seconds = self._timeframe_seconds()
+        if expected_seconds:
+            expected_delta = pd.Timedelta(seconds=expected_seconds)
+            deltas = times.diff().dropna()
+            gaps = deltas[deltas > expected_delta]
+            if not gaps.empty:
+                max_gap = gaps.max()
+                return self._record_qc_failure(
+                    f"QC failed: detected {len(gaps)} time gaps (max gap {max_gap})"
+                )
+
+        self.last_qc_failure_reason = None
+        return df
+
+    def _record_qc_failure(self, reason: str) -> Optional[pd.DataFrame]:
+        """Track and log QC failures, returning None for caller handling."""
+        self.qc_failures += 1
+        self.qc_failure_reasons[reason] = self.qc_failure_reasons.get(reason, 0) + 1
+        self.last_qc_failure_reason = reason
+        self.logger.error(reason)
+        return None
+
+    def get_bars_with_qc(self, count: int = 500) -> Optional[pd.DataFrame]:
+        """Fetch bars and apply QC checks. Returns None on QC failure."""
+        df = self.get_bars(count=count)
+        return self.qc_check_bars(df)
     
     def get_latest_bar(self) -> Optional[pd.Series]:
         """
