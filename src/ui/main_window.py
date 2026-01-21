@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont, QColor
 from datetime import datetime, timedelta
 import logging
+import math
 import yaml
 
 # Try to import BacktestWindow
@@ -1368,11 +1369,13 @@ class MainWindow(QMainWindow):
     
     def update_market_data(self, price: float, indicators: dict):
         """Update market data display."""
-        self.lbl_price.setText(f"{price:.2f}")
-        if indicators:
-            self.lbl_ema50.setText(f"EMA 50: {indicators.get('ema50', 0):.2f}")
-            self.lbl_ema200.setText(f"EMA 200: {indicators.get('ema200', 0):.2f}")
-            self.lbl_atr.setText(f"ATR 14: {indicators.get('atr14', 0):.2f}")
+        price_text = self._format_number(price, precision=2)
+        self.lbl_price.setText(f"Price: {price_text}")
+
+        indicators = indicators or {}
+        self.lbl_ema50.setText(f"EMA 50: {self._format_number(indicators.get('ema50'), precision=2)}")
+        self.lbl_ema200.setText(f"EMA 200: {self._format_number(indicators.get('ema200'), precision=2)}")
+        self.lbl_atr.setText(f"ATR 14: {self._format_number(indicators.get('atr14'), precision=2)}")
     
     def update_pattern_status(self, pattern: dict = None):
         """Update pattern detection display."""
@@ -1380,10 +1383,13 @@ class MainWindow(QMainWindow):
             self.lbl_pattern_status.setText("Status: Double Bottom Detected")
             self.lbl_pattern_status.setStyleSheet("color: green; font-weight: bold;")
             
-            details = f"Left Low: {pattern['left_low']['price']:.2f}\n"
-            details += f"Neckline: {pattern['neckline']['price']:.2f}\n"
-            details += f"Right Low: {pattern['right_low']['price']:.2f}\n"
-            details += f"Equality: {pattern.get('equality_diff_percent', 0):.2f}%"
+            left_low = pattern.get('left_low') or {}
+            neckline = pattern.get('neckline') or {}
+            right_low = pattern.get('right_low') or {}
+            details = f"Left Low: {self._format_number(left_low.get('price'), precision=2)}\n"
+            details += f"Neckline: {self._format_number(neckline.get('price'), precision=2)}\n"
+            details += f"Right Low: {self._format_number(right_low.get('price'), precision=2)}\n"
+            details += f"Equality: {self._format_number_with_suffix(pattern.get('equality_diff_percent'), '%', precision=2)}"
             self.lbl_pattern_details.setText(details)
         else:
             self.lbl_pattern_status.setText("Status: No pattern")
@@ -1402,9 +1408,13 @@ class MainWindow(QMainWindow):
                            'ema50_ema200_distance': 0.0, 'price_ema50_distance': 0.0}
         
         regime = regime_state.get('regime', 'RANGE')
-        confidence = regime_state.get('confidence', 0.0) * 100  # Convert to percentage
-        ema_distance = regime_state.get('ema50_ema200_distance', 0.0)
-        price_distance = regime_state.get('price_ema50_distance', 0.0)
+        confidence_value = regime_state.get('confidence', 0.0)
+        try:
+            confidence_pct = float(confidence_value) * 100
+        except (TypeError, ValueError):
+            confidence_pct = None
+        ema_distance = regime_state.get('ema50_ema200_distance')
+        price_distance = regime_state.get('price_ema50_distance')
         
         # Color scheme based on regime type
         if regime == 'BULL':
@@ -1419,11 +1429,14 @@ class MainWindow(QMainWindow):
         self.lbl_regime.setStyleSheet(f"color: {regime_color}; font-weight: bold; font-size: 12pt;")
         
         # Update confidence
-        self.lbl_regime_confidence.setText(f"Confidence: {confidence:.1f}%")
+        confidence_text = self._format_number_with_suffix(confidence_pct, "%", precision=1)
+        self.lbl_regime_confidence.setText(f"Confidence: {confidence_text}")
         
         # Update distances
-        self.lbl_ema_distance.setText(f"EMA Distance: {ema_distance:+.2f}%")
-        self.lbl_price_distance.setText(f"Price Distance: {price_distance:+.2f}%")
+        ema_distance_text = self._format_number_with_suffix(ema_distance, "%", precision=2, signed=True)
+        price_distance_text = self._format_number_with_suffix(price_distance, "%", precision=2, signed=True)
+        self.lbl_ema_distance.setText(f"EMA Distance: {ema_distance_text}")
+        self.lbl_price_distance.setText(f"Price Distance: {price_distance_text}")
     
     def update_entry_conditions(self, conditions: dict):
         """Update entry conditions display."""
@@ -1491,6 +1504,32 @@ class MainWindow(QMainWindow):
             self.lbl_quality_score.setText("Overall: -")
             self.lbl_quality_score.setStyleSheet("color: gray;")
             self.lbl_quality_breakdown.setText("Pattern: - | EMA: - | Momentum: - | Volatility: -")
+
+    def _format_number(self, value, precision: int = 2, signed: bool = False) -> str:
+        """Format a numeric value safely for UI display."""
+        if value is None:
+            return "-"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "-"
+        if math.isnan(numeric) or math.isinf(numeric):
+            return "-"
+        sign = "+" if signed else ""
+        return f"{numeric:{sign}.{precision}f}"
+
+    def _format_number_with_suffix(
+        self,
+        value,
+        suffix: str,
+        precision: int = 2,
+        signed: bool = False,
+    ) -> str:
+        """Format a number and append a suffix when valid."""
+        formatted = self._format_number(value, precision=precision, signed=signed)
+        if formatted == "-":
+            return "-"
+        return f"{formatted}{suffix}"
     
     def update_guard_status(self, decision_output: dict = None):
         """
