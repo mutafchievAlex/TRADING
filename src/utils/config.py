@@ -98,6 +98,9 @@ def _default_config_dict() -> Dict[str, Any]:
         "data": {
             "bars_to_fetch": 500,
             "state_file": "data/state.json",
+            "storage_backend": "file",
+            "db_url": "sqlite:///data/state.db",
+            "backup_dir": "data/backups",
         },
         "logging": {
             "log_dir": "logs",
