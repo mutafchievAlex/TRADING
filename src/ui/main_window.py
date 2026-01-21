@@ -1373,9 +1373,22 @@ class MainWindow(QMainWindow):
         self.lbl_price.setText(f"Price: {price_text}")
 
         indicators = indicators or {}
-        self.lbl_ema50.setText(f"EMA 50: {self._format_number(indicators.get('ema50'), precision=2)}")
-        self.lbl_ema200.setText(f"EMA 200: {self._format_number(indicators.get('ema200'), precision=2)}")
-        self.lbl_atr.setText(f"ATR 14: {self._format_number(indicators.get('atr14'), precision=2)}")
+        if (
+            isinstance(indicators, dict)
+            and "indicators" in indicators
+            and not any(key in indicators for key in ("ema50", "ema200", "atr14", "atr"))
+        ):
+            indicators = indicators.get("indicators") or {}
+
+        ema50 = indicators.get("ema50")
+        ema200 = indicators.get("ema200")
+        atr14 = indicators.get("atr14")
+        if atr14 is None:
+            atr14 = indicators.get("atr")
+
+        self.lbl_ema50.setText(f"EMA 50: {self._format_number(ema50, precision=2)}")
+        self.lbl_ema200.setText(f"EMA 200: {self._format_number(ema200, precision=2)}")
+        self.lbl_atr.setText(f"ATR 14: {self._format_number(atr14, precision=2)}")
     
     def update_pattern_status(self, pattern: dict = None):
         """Update pattern detection display."""
