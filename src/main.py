@@ -1310,17 +1310,18 @@ class TradingController(QObject):
         try:
             live_price = self.market_data.get_current_tick()
             display_price = live_price
-            if display_price is None and self.last_market_bar is not None:
-                if isinstance(self.last_market_bar, dict):
-                    display_price = self.last_market_bar.get("close")
+            last_market_bar = getattr(self, "last_market_bar", None)
+            if display_price is None and last_market_bar is not None:
+                if isinstance(last_market_bar, dict):
+                    display_price = last_market_bar.get("close")
                 else:
-                    display_price = self.last_market_bar["close"]
+                    display_price = last_market_bar["close"]
             if display_price is None:
                 return
 
             self.ui_queue.post_event(UIEventType.UPDATE_MARKET_DATA, {
                 'price': display_price,
-                'indicators': self.last_indicators or {}
+                'indicators': getattr(self, "last_indicators", None) or {}
             })
         except Exception as exc:
             self.logger.error(f"Error refreshing market data UI: {exc}", exc_info=True)
@@ -2343,8 +2344,6 @@ class HeadlessTradingRunner:
             dev_mode=self.config.get("mode.demo_mode", True),
         )
 
-        self.last_market_bar = None
-        self.last_indicators = None
         self.last_closed_bar_time: Optional[datetime] = None
         self.last_trade_bar_index: int = -9999
         self.bar_counter: int = 0
