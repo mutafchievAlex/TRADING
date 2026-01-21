@@ -1155,6 +1155,8 @@ class TradingController(QObject):
             if not self.is_running or not self.is_connected:
                 return
 
+            self._sync_live_positions()
+
             now = time.time()
             if self.qc_next_retry_at and now < self.qc_next_retry_at:
                 self.logger.debug(
@@ -1162,6 +1164,7 @@ class TradingController(QObject):
                     self.qc_next_retry_at,
                     now,
                 )
+                self._refresh_market_data_ui()
                 return
             
             # Start main loop timer for performance monitoring
@@ -1178,9 +1181,11 @@ class TradingController(QObject):
             
             if df is None:
                 self._handle_qc_failure(self.market_data.last_qc_failure_reason)
+                self._refresh_market_data_ui()
                 return
             if len(df) < 220:
                 self.logger.warning(f"Insufficient market data: {len(df)} bars (need 220+)")
+                self._refresh_market_data_ui()
                 return
 
             if self.qc_failure_count:
@@ -1194,6 +1199,8 @@ class TradingController(QObject):
             # Get current bar (latest completed bar)
             current_bar = df.iloc[-2]
             current_indicators = self.indicator_engine.get_current_indicators(df)
+            self.last_market_bar = current_bar
+            self.last_indicators = current_indicators
             
             # 3. Detect patterns
             pattern = self.pattern_engine.detect_double_bottom(df)
@@ -1243,13 +1250,29 @@ class TradingController(QObject):
             if not live_positions:
                 return
 
-            tracked_tickets = {
-                position.get('ticket') for position in self.state_manager.get_all_positions()
+            tracked_positions = {
+                position.get('ticket'): position for position in self.state_manager.get_all_positions()
             }
             added_tickets = []
+            updated_tickets = []
             for live_position in live_positions:
                 ticket = live_position.get('ticket')
-                if ticket in tracked_tickets:
+                if ticket in tracked_positions:
+                    position = tracked_positions[ticket]
+                    if position is None:
+                        continue
+                    updated = False
+                    for field in ("price_current", "profit", "swap", "stop_loss", "take_profit", "volume"):
+                        live_value = live_position.get(field)
+                        if live_value is None:
+                            continue
+                        if position.get(field) != live_value:
+                            position[field] = live_value
+                            updated = True
+                            if field == "stop_loss":
+                                position["current_stop_loss"] = live_value
+                    if updated:
+                        updated_tickets.append(ticket)
                     continue
 
                 direction = 1 if live_position.get('type') == 'BUY' else -1
@@ -1267,17 +1290,42 @@ class TradingController(QObject):
                 })
                 added_tickets.append(ticket)
 
-            if added_tickets and self.window:
+            if (added_tickets or updated_tickets) and self.window:
                 positions = self.state_manager.get_all_positions()
                 self.ui_queue.post_event(
                     UIEventType.UPDATE_POSITION_DISPLAY,
                     {'positions': positions}
                 )
-                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
-                    'message': f"Recovered {len(added_tickets)} live position(s) from broker."
-                })
+                if added_tickets:
+                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
+                        'message': f"Recovered {len(added_tickets)} live position(s) from broker."
+                    })
         except Exception as exc:
             self.logger.error(f"Error syncing live positions: {exc}", exc_info=True)
+
+    def _refresh_market_data_ui(self) -> None:
+        """Refresh market data UI using cached indicators and latest tick."""
+        if not self.window:
+            return
+
+        try:
+            live_price = self.market_data.get_current_tick()
+            display_price = live_price
+            last_market_bar = getattr(self, "last_market_bar", None)
+            if display_price is None and last_market_bar is not None:
+                if isinstance(last_market_bar, dict):
+                    display_price = last_market_bar.get("close")
+                else:
+                    display_price = last_market_bar["close"]
+            if display_price is None:
+                return
+
+            self.ui_queue.post_event(UIEventType.UPDATE_MARKET_DATA, {
+                'price': display_price,
+                'indicators': getattr(self, "last_indicators", None) or {}
+            })
+        except Exception as exc:
+            self.logger.error(f"Error refreshing market data UI: {exc}", exc_info=True)
 
     def _handle_qc_failure(self, reason: Optional[str]) -> None:
         """Apply backoff behavior when QC fails."""
