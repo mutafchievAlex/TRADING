@@ -131,19 +131,15 @@ class ExecutionEngine:
             price = tick.ask  # For BUY orders, use ask price
             
             # Validate order parameters using the validator
-            try:
-                normalized_volume, validated_sl, validated_tp = self.validator.validate_order_params(
-                    symbol=self.symbol,
-                    volume=volume,
-                    order_type=mt5.ORDER_TYPE_BUY,
-                    price=price,
-                    sl=stop_loss,
-                    tp=take_profit,
-                    direction="LONG"
-                )
-            except InvalidOrderParametersError as e:
-                self.logger.error(f"Order validation failed: {e}")
-                raise
+            normalized_volume, validated_sl, validated_tp = self.validator.validate_order_params(
+                symbol=self.symbol,
+                volume=volume,
+                order_type=mt5.ORDER_TYPE_BUY,
+                price=price,
+                sl=stop_loss,
+                tp=take_profit,
+                direction="LONG"
+            )
             
             # Use normalized volume from validator
             volume = normalized_volume

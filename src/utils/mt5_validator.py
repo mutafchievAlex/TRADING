@@ -13,11 +13,28 @@ Validates:
 """
 
 import logging
+import math
 from typing import Optional, Tuple
 from src.exceptions import InvalidOrderParametersError
 
 
 logger = logging.getLogger(__name__)
+
+
+class MT5OrderValidator:
+    """
+    Validates MT5 order parameters against broker specifications.
+    
+    Configuration constants for validation thresholds.
+    """
+    
+    # Normalization thresholds
+    NORMALIZATION_WARNING_THRESHOLD = 0.5  # Warn if volume adjustment exceeds 50% of step
+    
+    # Distance validation thresholds (as percentages)
+    MIN_DISTANCE_PCT = 0.0001  # 0.01% minimum distance for SL/TP
+    MAX_SL_WARNING_PCT = 0.20  # 20% maximum SL distance (warning only)
+    MAX_PRICE_DEVIATION_PCT = 0.10  # 10% maximum price deviation for market orders
 
 
 class MT5OrderValidator:
@@ -127,15 +144,14 @@ class MT5OrderValidator:
         volume_step = symbol_info.volume_step
         normalized = round(volume / volume_step) * volume_step
         
-        # Round to appropriate decimal places using decimal module for precision
-        import math
+        # Round to appropriate decimal places using math for precision
         if volume_step < 1.0:
             decimals = max(0, -int(math.floor(math.log10(volume_step))))
         else:
             decimals = 0
         normalized = round(normalized, decimals)
         
-        if abs(normalized - volume) > volume_step / 2:
+        if abs(normalized - volume) > volume_step * self.NORMALIZATION_WARNING_THRESHOLD:
             self.logger.warning(f"Volume {volume} normalized to {normalized} (step: {volume_step})")
         
         return normalized
@@ -168,7 +184,7 @@ class MT5OrderValidator:
         # Check price is valid (not too far from current price for market orders)
         if order_type == "market":
             current_price = (symbol_info.bid + symbol_info.ask) / 2
-            max_deviation = current_price * 0.10  # 10% deviation max
+            max_deviation = current_price * self.MAX_PRICE_DEVIATION_PCT
             
             if abs(price - current_price) > max_deviation:
                 raise InvalidOrderParametersError(
@@ -216,12 +232,14 @@ class MT5OrderValidator:
         
         # Check SL is not too tight or too wide
         sl_distance = abs(entry_price - stop_loss)
-        if sl_distance < entry_price * 0.0001:  # 0.01% minimum
+        min_distance = entry_price * self.MIN_DISTANCE_PCT
+        if sl_distance < min_distance:
             raise InvalidOrderParametersError(
                 f"Stop loss too tight: {sl_distance} ({sl_distance/entry_price*100:.4f}%)"
             )
         
-        if sl_distance > entry_price * 0.20:  # 20% maximum
+        max_warning_distance = entry_price * self.MAX_SL_WARNING_PCT
+        if sl_distance > max_warning_distance:
             self.logger.warning(
                 f"Stop loss very wide: {sl_distance} ({sl_distance/entry_price*100:.2f}%)"
             )
@@ -267,7 +285,8 @@ class MT5OrderValidator:
         
         # Check TP is reasonable
         tp_distance = abs(take_profit - entry_price)
-        if tp_distance < entry_price * 0.0001:  # 0.01% minimum
+        min_distance = entry_price * self.MIN_DISTANCE_PCT
+        if tp_distance < min_distance:
             raise InvalidOrderParametersError(
                 f"Take profit too tight: {tp_distance} ({tp_distance/entry_price*100:.4f}%)"
             )
