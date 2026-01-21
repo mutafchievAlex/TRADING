@@ -14,6 +14,8 @@ import numpy as np
 from typing import Optional
 import logging
 
+from src.exceptions import IndicatorCalculationError, InsufficientDataError
+
 
 class IndicatorEngine:
     """
@@ -41,15 +43,29 @@ class IndicatorEngine:
             
         Returns:
             Series with EMA values
+            
+        Raises:
+            IndicatorCalculationError: If calculation fails
+            InsufficientDataError: If not enough data points
         """
         try:
+            if len(series) < period:
+                raise InsufficientDataError(
+                    f"Insufficient data for EMA({period}): got {len(series)} bars, need {period}"
+                )
+            
             # pandas ewm matches TradingView's EMA calculation
             # adjust=False ensures consistent behavior with Pine Script
             ema = series.ewm(span=period, adjust=False).mean()
             return ema
+        except InsufficientDataError:
+            raise
+        except (KeyError, ValueError, TypeError) as e:
+            self.logger.error(f"Invalid data for EMA({period}): {e}")
+            raise IndicatorCalculationError(f"EMA calculation failed: {e}")
         except Exception as e:
-            self.logger.error(f"Error calculating EMA({period}): {e}")
-            return pd.Series(index=series.index, dtype=float)
+            self.logger.error(f"Unexpected error calculating EMA({period}): {e}", exc_info=True)
+            raise IndicatorCalculationError(f"Unexpected EMA calculation error: {e}")
     
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         """
@@ -70,8 +86,17 @@ class IndicatorEngine:
             
         Returns:
             Series with ATR values
+            
+        Raises:
+            IndicatorCalculationError: If calculation fails
+            InsufficientDataError: If not enough data points
         """
         try:
+            if len(df) < period + 1:  # +1 for prev_close shift
+                raise InsufficientDataError(
+                    f"Insufficient data for ATR({period}): got {len(df)} bars, need {period + 1}"
+                )
+            
             high = df['high']
             low = df['low']
             close = df['close']
@@ -90,9 +115,17 @@ class IndicatorEngine:
             
             return atr
             
+        except InsufficientDataError:
+            raise
+        except KeyError as e:
+            self.logger.error(f"Missing required column for ATR: {e}")
+            raise IndicatorCalculationError(f"ATR calculation failed, missing column: {e}")
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Invalid data for ATR({period}): {e}")
+            raise IndicatorCalculationError(f"ATR calculation failed: {e}")
         except Exception as e:
-            self.logger.error(f"Error calculating ATR({period}): {e}")
-            return pd.Series(index=df.index, dtype=float)
+            self.logger.error(f"Unexpected error calculating ATR({period}): {e}", exc_info=True)
+            raise IndicatorCalculationError(f"Unexpected ATR calculation error: {e}")
     
     def calculate_all_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
