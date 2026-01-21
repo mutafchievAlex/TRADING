@@ -12,6 +12,13 @@ from typing import Optional, Tuple, TYPE_CHECKING
 import logging
 import time
 
+from src.exceptions import (
+    MT5ConnectionError,
+    MT5InitializationError,
+    MarketDataError,
+    InsufficientDataError
+)
+
 if TYPE_CHECKING:
     from config import AppConfig
 
@@ -167,8 +174,14 @@ class MarketDataService:
                 self.logger.warning("Connected to MT5 but account info unavailable")
             return True
             
+        except (MT5ConnectionError, MT5InitializationError) as e:
+            self.logger.error(f"MT5 connection error: {e}")
+            return False
+        except OSError as e:
+            self.logger.error(f"OS error during connection: {e}")
+            return False
         except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+            self.logger.error(f"Unexpected connection error: {e}", exc_info=True)
             return False
     
     def disconnect(self):
@@ -219,11 +232,16 @@ class MarketDataService:
                     return None
             
             self.logger.error(f"Failed to fetch bars after {max_retries} attempts")
-            return None
+            raise MarketDataError(f"Failed to fetch {count} bars for {self.symbol} after {max_retries} attempts")
             
+        except MarketDataError:
+            raise
+        except (OSError, IOError) as e:
+            self.logger.error(f"I/O error fetching bars: {e}")
+            raise MarketDataError(f"I/O error fetching market data: {e}")
         except Exception as e:
-            self.logger.error(f"Error fetching bars: {e}")
-            return None
+            self.logger.error(f"Unexpected error fetching bars: {e}", exc_info=True)
+            raise MarketDataError(f"Unexpected error fetching market data: {e}")
 
     def _timeframe_seconds(self) -> Optional[int]:
         """Return expected bar duration in seconds for current timeframe."""
@@ -322,8 +340,11 @@ class MarketDataService:
             if tick is None:
                 return None
             return tick.bid  # Use bid for current price display
+        except (OSError, IOError) as e:
+            self.logger.error(f"I/O error getting tick: {e}")
+            return None
         except Exception as e:
-            self.logger.error(f"Error getting tick: {e}")
+            self.logger.error(f"Unexpected error getting tick: {e}", exc_info=True)
             return None
 
     def get_percent_changes(self, current_price: float) -> dict:
