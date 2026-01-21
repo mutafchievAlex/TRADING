@@ -638,13 +638,14 @@ dev_mode = config.get('dev_mode', False)  # For other dev settings
 ```
 
 ### 9.3 Incomplete Environment Variable Support
-Only 3 MT5 vars supported:
+Only 4 MT5 vars supported:
 
 ```python
 # Supported:
 MT5_LOGIN
 MT5_PASSWORD
 MT5_SERVER
+MT5_TERMINAL_PATH
 
 # Not supported:
 MT5_SYMBOL
