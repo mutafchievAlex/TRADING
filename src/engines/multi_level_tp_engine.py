@@ -33,7 +33,12 @@ class MultiLevelTPEngine:
     DEFAULT_TP1_RR = 1.4
     DEFAULT_TP2_RR = 1.8
     
-    def __init__(self, default_rr_long: float = 2.0, default_rr_short: float = 2.0):
+    def __init__(
+        self,
+        default_rr_long: float = 2.0,
+        default_rr_short: float = 2.0,
+        logger: Optional[logging.Logger] = None,
+    ):
         """
         Initialize multi-level TP engine.
         
@@ -41,7 +46,10 @@ class MultiLevelTPEngine:
             default_rr_long: Default Risk:Reward for LONG trades (final TP)
             default_rr_short: Default Risk:Reward for SHORT trades (final TP)
         """
-        self.logger = logging.getLogger(__name__)
+        if logger is not None and hasattr(logger, "get_main_logger"):
+            self.logger = logger.get_main_logger()
+        else:
+            self.logger = logger or logging.getLogger(__name__)
         self.default_rr_long = default_rr_long
         self.default_rr_short = default_rr_short
         
