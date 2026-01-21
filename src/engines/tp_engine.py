@@ -389,5 +389,5 @@ class TPEngine:
                 wick_up = bar['high']
                 wick_down = bar['open'] - bar['low']
                 return wick_down > wick_up * 1.5 and bar['close'] > bar['open']
-        except:
+        except (KeyError, TypeError, Exception):
             return False
