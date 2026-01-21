@@ -139,6 +139,10 @@ class StateManager:
                 'bars_held_after_tp2': position_data.get('bars_held_after_tp2', 0),
                 'max_extension_after_tp2': position_data.get('max_extension_after_tp2', 0.0),
                 'tp2_exit_reason': position_data.get('tp2_exit_reason'),
+                # Live broker fields (optional)
+                'price_current': position_data.get('price_current'),
+                'profit': position_data.get('profit'),
+                'swap': position_data.get('swap'),
             }
             
             self.open_positions.append(new_position)
