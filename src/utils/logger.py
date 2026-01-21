@@ -8,11 +8,51 @@ This module provides centralized logging with:
 - Structured trade logging
 """
 
+import json
 import logging
 import sys
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from typing import Optional
+
+
+_correlation_id: ContextVar[str] = ContextVar("correlation_id", default="-")
+
+
+def set_correlation_id(value: Optional[str]) -> None:
+    """Set correlation ID for the current context."""
+    _correlation_id.set(value or "-")
+
+
+def clear_correlation_id() -> None:
+    """Clear correlation ID for the current context."""
+    _correlation_id.set("-")
+
+
+class CorrelationIdFilter(logging.Filter):
+    """Inject correlation_id into log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = _correlation_id.get("-")
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    """JSON formatter with required fields."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "module": record.module,
+            "correlation_id": getattr(record, "correlation_id", "-"),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_entry["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, ensure_ascii=False)
 
 
 class TradingLogger:
@@ -98,13 +138,11 @@ class TradingLogger:
         console_handler.setLevel(level)
         
         # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        formatter = JsonFormatter()
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
         
+        logger.addFilter(CorrelationIdFilter())
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
         

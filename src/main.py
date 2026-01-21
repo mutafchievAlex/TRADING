@@ -465,12 +465,13 @@ from engines.backtest_report_exporter import BacktestReportExporter
 from engines.market_regime_engine import MarketRegimeEngine
 from config import load_app_config
 from utils.config import load_config as load_legacy_config, Config
-from utils.logger import setup_logging
+from utils.logger import setup_logging, set_correlation_id, clear_correlation_id
 from utils.runtime_mode_manager import RuntimeModeManager, get_runtime_manager
 from utils.ui_update_queue import UIUpdateQueue, UIEventType
 from utils.health_monitor import HealthMonitor, HealthStatus
 from utils.performance_monitor import PerformanceMonitor, OperationType
 from utils.alert_manager import AlertManager, AlertType, AlertSeverity
+from utils.metrics_tracker import MetricsTracker
 from ui.main_window import MainWindow
 from ui.backtest_window import BacktestWorker
 
@@ -578,6 +579,10 @@ class TradingController(QObject):
         # Performance Monitor (execution time tracking)
         self.performance_monitor = PerformanceMonitor(max_samples_per_operation=1000)
         self.logger.info("Performance monitor initialized")
+
+        # Trading Metrics Tracker
+        self.metrics_tracker = MetricsTracker()
+        self.logger.info("Trading metrics tracker initialized")
         
         # Alert Manager (notifications)
         self.alert_manager = AlertManager(max_history=500, min_alert_interval_seconds=5.0)
@@ -1186,7 +1191,23 @@ class TradingController(QObject):
             
             # 3. Detect patterns
             pattern = self.pattern_engine.detect_double_bottom(df)
+
+            account_info = self.market_data.get_account_info()
+            equity = account_info.get("equity") if account_info else 0.0
+            self.metrics_tracker.update_equity(float(equity or 0.0))
             
+            bar_time = None
+            if isinstance(current_bar, dict):
+                bar_time = current_bar.get("time")
+            else:
+                bar_time = current_bar.get("time") if hasattr(current_bar, "get") else None
+            set_correlation_id(str(bar_time) if bar_time else None)
+            self.logger.info(
+                "Event: bar processed time=%s close=%.5f",
+                bar_time,
+                float(current_bar["close"]),
+            )
+
             # 4. Check positions - support pyramiding
             pyramiding = self.config.get('strategy.pyramiding', 1)
             can_open_new = self.state_manager.can_open_new_position(max_positions=pyramiding)
@@ -1205,6 +1226,8 @@ class TradingController(QObject):
             
         except Exception as e:
             self.logger.error(f"Error in main loop: {e}", exc_info=True)
+        finally:
+            clear_correlation_id()
 
     def _handle_qc_failure(self, reason: Optional[str]) -> None:
         """Apply backoff behavior when QC fails."""
@@ -1235,7 +1258,11 @@ class TradingController(QObject):
                 df, pattern, current_bar_index=-2
             )
             
-            self.performance_monitor.end_timer(entry_timer, OperationType.ENTRY_EVALUATION)
+            decision_latency_ms = self.performance_monitor.end_timer(
+                entry_timer, OperationType.ENTRY_EVALUATION
+            )
+            self.metrics_tracker.record_latency_ms(decision_latency_ms)
+            self.metrics_tracker.record_decision()
             
             # Update UI with entry conditions (thread-safe)
             if self.window:
@@ -1244,10 +1271,14 @@ class TradingController(QObject):
             
             # Log decision
             if not should_enter:
-                self.logger.debug(f"Entry rejected: {entry_details.get('reason', 'Unknown')}")
+                self.logger.info(
+                    "Decision outcome: reject reason=%s",
+                    entry_details.get("reason", "Unknown"),
+                )
                 return
             
             # Entry signal detected
+            self.logger.info("Decision outcome: enter")
             self.logger.info("ENTRY SIGNAL DETECTED")
             self.trading_logger.log_trade({
                 'type': 'SIGNAL',
@@ -1383,7 +1414,11 @@ class TradingController(QObject):
                     'pattern_type': 'Double Bottom'
                 })
                 
-                self.logger.info(f"Trade executed successfully: Ticket {ticket}, Entry={actual_entry_price:.5f}")
+                self.logger.info(
+                    "Order result: success ticket=%s entry=%.5f",
+                    ticket,
+                    actual_entry_price,
+                )
                 
                 # Send alert for position opened
                 self.alert_manager.alert_position_opened({
@@ -1401,7 +1436,8 @@ class TradingController(QObject):
                     if all_positions:
                         self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': all_positions})
             else:
-                self.logger.error("Order execution failed")
+                self.logger.error("Order result: failure")
+            self.metrics_tracker.record_order_result(bool(order_result))
                 
         except Exception as e:
             self.logger.error(f"Error executing entry: {e}", exc_info=True)
@@ -2137,7 +2173,10 @@ class TradingController(QObject):
     
     def get_performance_metrics(self) -> Dict:
         """Get all performance metrics (for external monitoring)."""
-        return self.performance_monitor.get_all_metrics()
+        return {
+            "performance": self.performance_monitor.get_all_metrics(),
+            "trading": self.metrics_tracker.get_metrics(),
+        }
     
     def get_performance_report(self) -> str:
         """Get formatted performance report (for logging/display)."""
@@ -2160,6 +2199,7 @@ class HeadlessTradingRunner:
             log_level=log_config.get("log_level", "INFO"),
         )
         self.logger = self.trading_logger.get_main_logger()
+        self.metrics_tracker = MetricsTracker()
         self.poll_interval_seconds = max(1.0, poll_interval_seconds)
 
         mt5_config = self.app_config.mt5
@@ -2333,85 +2373,102 @@ class HeadlessTradingRunner:
 
         self.last_closed_bar_time = bar_time
         self.bar_counter += 1
-
-        pattern = self.pattern_engine.detect_double_bottom(closed_df)
-        account_info = self.market_data.get_account_info()
-        symbol_info = self.market_data.get_symbol_info()
-        equity = account_info.get("equity") if account_info else 0.0
-        account_state = {
-            "equity": equity,
-            "open_positions": len(self.state_manager.open_positions),
-            "last_trade_bar": self.last_trade_bar_index,
-        }
-        decision = self.decision_engine.evaluate(
-            bar_index=len(closed_df) - 1,
-            df=closed_df,
-            pattern=pattern,
-            account_state=account_state,
-            direction="LONG",
-            symbol_info=symbol_info,
+        set_correlation_id(str(bar_time))
+        self.logger.info(
+            "Event: bar processed time=%s close=%.5f",
+            bar_time,
+            float(current_bar["close"]),
         )
-        decision.decision_source = "Live"
 
-        if decision.decision != DecisionResult.TRADE_ALLOWED:
-            self.logger.info(
-                "Decision: %s (%s)",
-                decision.decision.value,
-                decision.reason or "No trade",
+        try:
+            pattern = self.pattern_engine.detect_double_bottom(closed_df)
+            account_info = self.market_data.get_account_info()
+            symbol_info = self.market_data.get_symbol_info()
+            equity = account_info.get("equity") if account_info else 0.0
+            self.metrics_tracker.update_equity(float(equity or 0.0))
+
+            account_state = {
+                "equity": equity,
+                "open_positions": len(self.state_manager.open_positions),
+                "last_trade_bar": self.last_trade_bar_index,
+            }
+            decision_start = time.perf_counter()
+            decision = self.decision_engine.evaluate(
+                bar_index=len(closed_df) - 1,
+                df=closed_df,
+                pattern=pattern,
+                account_state=account_state,
+                direction="LONG",
+                symbol_info=symbol_info,
             )
+            decision_latency_ms = (time.perf_counter() - decision_start) * 1000.0
+            self.metrics_tracker.record_latency_ms(decision_latency_ms)
+            self.metrics_tracker.record_decision()
+            decision.decision_source = "Live"
+
+            if decision.decision != DecisionResult.TRADE_ALLOWED:
+                self.logger.info(
+                    "Decision outcome: %s (%s)",
+                    decision.decision.value,
+                    decision.reason or "No trade",
+                )
+                self.state_manager.save_state()
+                return
+            self.logger.info("Decision outcome: %s", decision.decision.value)
+
+            symbol_info = symbol_info or {}
+            entry_price = decision.planned_entry or float(current_bar["close"])
+            stop_loss = decision.planned_sl
+            take_profit = decision.planned_tp3
+
+            if stop_loss is None:
+                atr = float(current_bar.get("atr14", 0.0))
+                stop_loss = entry_price - (atr * self.decision_engine.atr_multiplier_stop)
+
+            volume = self.risk_engine.calculate_position_size(
+                equity=equity,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                symbol_info=symbol_info,
+            )
+            if volume is None:
+                self.logger.warning("Position sizing failed; skipping execution.")
+                return
+
+            order = self.execution_engine.send_market_order(
+                order_type="BUY",
+                volume=volume,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                comment="DecisionEngine Bar-Close",
+            )
+            if order:
+                self.last_trade_bar_index = self.bar_counter
+                self.state_manager.open_position(
+                    {
+                        "ticket": order["order"],
+                        "entry_price": order["price"],
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "volume": volume,
+                        "entry_time": order.get("timestamp", datetime.now()),
+                        "pattern_info": pattern,
+                        "atr": float(current_bar.get("atr14", 0.0)),
+                    }
+                )
+                self.logger.info(
+                    "Order result: success ticket=%s volume=%.2f entry=%.2f",
+                    order["order"],
+                    volume,
+                    order["price"],
+                )
+            else:
+                self.logger.warning("Order result: failure; no state persisted for entry.")
+
+            self.metrics_tracker.record_order_result(bool(order))
             self.state_manager.save_state()
-            return
-
-        symbol_info = symbol_info or {}
-        entry_price = decision.planned_entry or float(current_bar["close"])
-        stop_loss = decision.planned_sl
-        take_profit = decision.planned_tp3
-
-        if stop_loss is None:
-            atr = float(current_bar.get("atr14", 0.0))
-            stop_loss = entry_price - (atr * self.decision_engine.atr_multiplier_stop)
-
-        volume = self.risk_engine.calculate_position_size(
-            equity=equity,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            symbol_info=symbol_info,
-        )
-        if volume is None:
-            self.logger.warning("Position sizing failed; skipping execution.")
-            return
-
-        order = self.execution_engine.send_market_order(
-            order_type="BUY",
-            volume=volume,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            comment="DecisionEngine Bar-Close",
-        )
-        if order:
-            self.last_trade_bar_index = self.bar_counter
-            self.state_manager.open_position(
-                {
-                    "ticket": order["order"],
-                    "entry_price": order["price"],
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "volume": volume,
-                    "entry_time": order.get("timestamp", datetime.now()),
-                    "pattern_info": pattern,
-                    "atr": float(current_bar.get("atr14", 0.0)),
-                }
-            )
-            self.logger.info(
-                "Order executed: ticket=%s volume=%.2f entry=%.2f",
-                order["order"],
-                volume,
-                order["price"],
-            )
-        else:
-            self.logger.warning("Order execution failed; no state persisted for entry.")
-
-        self.state_manager.save_state()
+        finally:
+            clear_correlation_id()
 
     def run(self) -> None:
         if not self.connect_mt5():
