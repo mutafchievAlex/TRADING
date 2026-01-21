@@ -579,7 +579,8 @@ class StateManager:
         """Force immediate write of pending state (blocks)."""
         try:
             if self.atomic_writer:
-                self.atomic_writer.flush()
+                flushed = self.atomic_writer.flush()
+                self.logger.info("State flush executed (success=%s)", flushed)
         except Exception as e:
             self.logger.error(f"Error flushing state: {e}")
     
