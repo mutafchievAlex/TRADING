@@ -79,7 +79,8 @@ class MT5OrderValidator:
         if not symbol_info.visible:
             raise InvalidOrderParametersError(f"Symbol not visible in Market Watch: {symbol}")
         
-        if not symbol_info.trade_mode:
+        # Check trade_mode - SYMBOL_TRADE_MODE_DISABLED = 0, SYMBOL_TRADE_MODE_FULL = 4
+        if symbol_info.trade_mode == 0:  # SYMBOL_TRADE_MODE_DISABLED
             raise InvalidOrderParametersError(f"Trading disabled for symbol: {symbol}")
     
     def validate_volume(self, symbol: str, volume: float) -> float:
@@ -126,8 +127,12 @@ class MT5OrderValidator:
         volume_step = symbol_info.volume_step
         normalized = round(volume / volume_step) * volume_step
         
-        # Round to appropriate decimal places
-        decimals = len(str(volume_step).split('.')[-1]) if '.' in str(volume_step) else 0
+        # Round to appropriate decimal places using decimal module for precision
+        import math
+        if volume_step < 1.0:
+            decimals = max(0, -int(math.floor(math.log10(volume_step))))
+        else:
+            decimals = 0
         normalized = round(normalized, decimals)
         
         if abs(normalized - volume) > volume_step / 2:
