@@ -1216,6 +1216,7 @@ class TradingController(QObject):
 
             # 4. Check positions - support pyramiding
             pyramiding = self.config.get('strategy.pyramiding', 1)
+            self._sync_live_positions()
             can_open_new = self.state_manager.can_open_new_position(max_positions=pyramiding)
             has_positions = self.state_manager.has_open_position()
             
@@ -1234,6 +1235,49 @@ class TradingController(QObject):
             self.logger.error(f"Error in main loop: {e}", exc_info=True)
         finally:
             clear_correlation_id()
+
+    def _sync_live_positions(self) -> None:
+        """Ensure live broker positions are tracked in the state manager/UI."""
+        try:
+            live_positions = self.execution_engine.get_open_positions()
+            if not live_positions:
+                return
+
+            tracked_tickets = {
+                position.get('ticket') for position in self.state_manager.get_all_positions()
+            }
+            added_tickets = []
+            for live_position in live_positions:
+                ticket = live_position.get('ticket')
+                if ticket in tracked_tickets:
+                    continue
+
+                direction = 1 if live_position.get('type') == 'BUY' else -1
+                self.state_manager.open_position({
+                    'ticket': ticket,
+                    'entry_price': live_position.get('price_open', 0.0),
+                    'stop_loss': live_position.get('stop_loss', 0.0),
+                    'take_profit': live_position.get('take_profit', 0.0),
+                    'volume': live_position.get('volume', 0.0),
+                    'entry_time': live_position.get('time'),
+                    'direction': direction,
+                    'price_current': live_position.get('price_current', 0.0),
+                    'profit': live_position.get('profit', 0.0),
+                    'swap': live_position.get('swap', 0.0),
+                })
+                added_tickets.append(ticket)
+
+            if added_tickets and self.window:
+                positions = self.state_manager.get_all_positions()
+                self.ui_queue.post_event(
+                    UIEventType.UPDATE_POSITION_DISPLAY,
+                    {'positions': positions}
+                )
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
+                    'message': f"Recovered {len(added_tickets)} live position(s) from broker."
+                })
+        except Exception as exc:
+            self.logger.error(f"Error syncing live positions: {exc}", exc_info=True)
 
     def _handle_qc_failure(self, reason: Optional[str]) -> None:
         """Apply backoff behavior when QC fails."""
