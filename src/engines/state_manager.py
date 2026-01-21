@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from pathlib import Path
 from utils.atomic_state_writer import AtomicStateWriter
+from storage.state_database import StateDatabase
 
 
 class StateManager:
@@ -29,9 +30,15 @@ class StateManager:
     - Persist state to disk (atomic, thread-safe)
     """
     
-    def __init__(self, state_file: str = "data/state.json",
-                 backup_dir: str = "data/backups",
-                 use_atomic_writes: bool = True):
+    def __init__(
+        self,
+        state_file: str = "data/state.json",
+        backup_dir: str = "data/backups",
+        use_atomic_writes: bool = True,
+        storage_backend: str = "file",
+        db_url: Optional[str] = None,
+        dev_mode: bool = True,
+    ):
         """
         Initialize State Manager.
         
@@ -43,17 +50,35 @@ class StateManager:
         self.state_file = Path(state_file)
         self.logger = logging.getLogger(__name__)
         self.use_atomic_writes = use_atomic_writes
+        self.storage_backend = storage_backend
+        self.db_url = db_url
+        self.dev_mode = dev_mode
+        self.db_store: Optional[StateDatabase] = None
+
+        if self.dev_mode and self.storage_backend != "file":
+            self.logger.warning(
+                "Dev mode enabled; falling back to file storage backend."
+            )
+            self.storage_backend = "file"
         
-        # Initialize atomic writer if enabled
-        if use_atomic_writes:
+        # Initialize atomic writer if enabled (file storage only)
+        if self.storage_backend == "file" and use_atomic_writes:
             self.atomic_writer = AtomicStateWriter(
                 state_file=str(state_file),
                 backup_dir=backup_dir,
                 batch_interval_seconds=5,
-                max_backups=10
+                max_backups=10,
             )
         else:
             self.atomic_writer = None
+
+        if self.storage_backend == "db":
+            try:
+                resolved_db_url = db_url or "sqlite:///data/state.db"
+                self.db_store = StateDatabase(resolved_db_url, self.logger)
+            except Exception as exc:
+                self.logger.error("DB storage unavailable: %s", exc)
+                self.storage_backend = "file"
         
         # Current state - support multiple positions for pyramiding
         self.open_positions: List[Dict] = []  # Changed from single position to list
@@ -425,42 +450,46 @@ class StateManager:
             List of recent trade dicts
         """
         return self.trade_history[-count:]
+
+    def _build_state_data(self) -> Dict:
+        state_data = {
+            'open_positions': [],
+            'trade_history': self.trade_history,
+            'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
+            'total_trades': self.total_trades,
+            'winning_trades': self.winning_trades,
+            'losing_trades': self.losing_trades,
+            'total_profit': self.total_profit,
+            'last_regime_state': self.last_regime_state,
+        }
+
+        for pos in self.open_positions:
+            pos_copy = pos.copy()
+            if 'entry_time' in pos_copy and isinstance(pos_copy['entry_time'], datetime):
+                pos_copy['entry_time'] = pos_copy['entry_time'].isoformat()
+            state_data['open_positions'].append(pos_copy)
+
+        return state_data
     
     def save_state(self):
         """
-        Persist current state to disk (thread-safe, atomic).
-        
-        If atomic writes enabled: queues write, batched every 5 seconds
-        If atomic writes disabled: direct write (NOT recommended)
+        Persist current state (file or DB).
+
+        If file + atomic writes enabled: queues write, batched every 5 seconds.
+        If file + atomic writes disabled: direct write (NOT recommended).
         """
         try:
-            # Prepare state data
-            state_data = {
-                'open_positions': [],
-                'trade_history': self.trade_history,
-                'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
-                'total_trades': self.total_trades,
-                'winning_trades': self.winning_trades,
-                'losing_trades': self.losing_trades,
-                'total_profit': self.total_profit,
-                'last_regime_state': self.last_regime_state,
-            }
-            
-            # Convert datetime objects in open positions if needed
-            for pos in self.open_positions:
-                pos_copy = pos.copy()
-                if 'entry_time' in pos_copy and isinstance(pos_copy['entry_time'], datetime):
-                    pos_copy['entry_time'] = pos_copy['entry_time'].isoformat()
-                state_data['open_positions'].append(pos_copy)
-            
-            # Use atomic writer if available, otherwise fallback to direct write
+            state_data = self._build_state_data()
+
+            if self.storage_backend == "db" and self.db_store:
+                self.db_store.save_state(state_data)
+                return
+
             if self.atomic_writer:
-                # Queue write - will be batched and written every 5 seconds
                 self.atomic_writer.queue_write(state_data)
             else:
-                # Fallback to direct write (less safe, but works if atomic disabled)
                 self._direct_write(state_data)
-            
+
         except Exception as e:
             self.logger.error(f"Error saving state: {e}")
     
@@ -494,43 +523,25 @@ class StateManager:
         """
         try:
             state_data = None
-            
-            # Try atomic loader if available
-            if self.atomic_writer:
-                state_data = self.atomic_writer.load_with_validation()
+
+            if self.storage_backend == "db" and self.db_store:
+                state_data = self.db_store.load_latest_snapshot()
+                if not state_data:
+                    state_data = self._load_state_from_file()
+                    if state_data:
+                        self.logger.info(
+                            "Backfilling DB state from %s", self.state_file
+                        )
+                        self.db_store.save_state(state_data)
             else:
-                # Fallback to direct load
-                state_data = self._direct_load()
-            
+                state_data = self._load_state_from_file()
+
             if not state_data:
                 self.logger.info("No valid state file found, starting fresh")
                 return
-            
-            # Restore state - handle both old format (current_position) and new (open_positions)
-            if 'open_positions' in state_data:
-                self.open_positions = state_data.get('open_positions', [])
-            elif 'current_position' in state_data and state_data['current_position']:
-                # Backwards compatibility: convert single position to list
-                self.open_positions = [state_data['current_position']]
-            
-            self.trade_history = state_data.get('trade_history', [])
-            self.total_trades = state_data.get('total_trades', 0)
-            self.winning_trades = state_data.get('winning_trades', 0)
-            self.losing_trades = state_data.get('losing_trades', 0)
-            self.total_profit = state_data.get('total_profit', 0.0)
-            # Regime state
-            self.last_regime_state = state_data.get('last_regime_state')
-            
-            # Parse last_trade_time
-            last_trade_str = state_data.get('last_trade_time')
-            if last_trade_str:
-                self.last_trade_time = datetime.fromisoformat(last_trade_str)
-            
-            self.logger.info(f"State loaded from {self.state_file}")
-            self.logger.info(f"  Total trades: {self.total_trades}")
-            self.logger.info(f"  Total profit: ${self.total_profit:.2f}")
-            self.logger.info(f"  Open positions: {len(self.open_positions)}")
-            
+
+            self._apply_state_data(state_data)
+
         except Exception as e:
             self.logger.error(f"Error loading state: {e}")
     
@@ -551,6 +562,39 @@ class StateManager:
         except Exception as e:
             self.logger.error(f"Error in direct load: {e}")
             return None
+
+    def _load_state_from_file(self) -> Optional[Dict]:
+        if self.atomic_writer:
+            return self.atomic_writer.load_with_validation()
+        return self._direct_load()
+
+    def _apply_state_data(self, state_data: Dict) -> None:
+        # Restore state - handle both old format (current_position) and new (open_positions)
+        if 'open_positions' in state_data:
+            self.open_positions = state_data.get('open_positions', [])
+        elif 'current_position' in state_data and state_data['current_position']:
+            self.open_positions = [state_data['current_position']]
+
+        self.trade_history = state_data.get('trade_history', [])
+        self.total_trades = state_data.get('total_trades', 0)
+        self.winning_trades = state_data.get('winning_trades', 0)
+        self.losing_trades = state_data.get('losing_trades', 0)
+        self.total_profit = state_data.get('total_profit', 0.0)
+        self.last_regime_state = state_data.get('last_regime_state')
+
+        last_trade_str = state_data.get('last_trade_time')
+        if last_trade_str:
+            self.last_trade_time = datetime.fromisoformat(last_trade_str)
+
+        source = (
+            "database"
+            if self.storage_backend == "db" and self.db_store
+            else str(self.state_file)
+        )
+        self.logger.info(f"State loaded from {source}")
+        self.logger.info(f"  Total trades: {self.total_trades}")
+        self.logger.info(f"  Total profit: ${self.total_profit:.2f}")
+        self.logger.info(f"  Open positions: {len(self.open_positions)}")
 
 
     def set_regime_state(self, regime_state: Dict):
@@ -595,6 +639,9 @@ class StateManager:
             # Stop atomic writer thread
             if self.atomic_writer:
                 self.atomic_writer.stop()
+
+            if self.db_store:
+                self.db_store.close()
             
             self.logger.info("StateManager shutdown complete")
         except Exception as e:

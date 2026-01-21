@@ -644,10 +644,16 @@ class TradingController(QObject):
             # State manager (with atomic writes for thread-safe persistence)
             state_file = self.config.get('data.state_file', 'data/state.json')
             backup_dir = self.config.get('data.backup_dir', 'data/backups')
+            storage_backend = self.config.get('data.storage_backend', 'file')
+            db_url = self.config.get('data.db_url', 'sqlite:///data/state.db')
+            dev_mode = self.config.get('mode.demo_mode', True)
             self.state_manager = StateManager(
                 state_file=state_file,
                 backup_dir=backup_dir,
-                use_atomic_writes=True  # Enable thread-safe atomic writes
+                use_atomic_writes=True,  # Enable thread-safe atomic writes
+                storage_backend=storage_backend,
+                db_url=db_url,
+                dev_mode=dev_mode,
             )
 
             # Sync persisted cooldown so restarts do not reset it
@@ -2242,6 +2248,9 @@ class HeadlessTradingRunner:
             state_file=self.config.get("data.state_file", "data/state.json"),
             backup_dir=self.config.get("data.backup_dir", "data/backups"),
             use_atomic_writes=True,
+            storage_backend=self.config.get("data.storage_backend", "file"),
+            db_url=self.config.get("data.db_url", "sqlite:///data/state.db"),
+            dev_mode=self.config.get("mode.demo_mode", True),
         )
 
         self.last_closed_bar_time: Optional[datetime] = None
