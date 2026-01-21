@@ -1223,6 +1223,7 @@ class TradingController(QObject):
 
             # 4. Check positions - support pyramiding
             pyramiding = self.config.get('strategy.pyramiding', 1)
+            self._sync_live_positions()
             can_open_new = self.state_manager.can_open_new_position(max_positions=pyramiding)
             has_positions = self.state_manager.has_open_position()
             
