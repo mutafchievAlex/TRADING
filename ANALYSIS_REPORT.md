@@ -43,30 +43,27 @@ except (OSError, Exception):  # file cleanup
 except (KeyError, TypeError, Exception):  # tp_engine.py
 ```
 
-### 1.2 Duplicate Logging Configuration 🔴 CRITICAL
-**12 engine modules** call `logging.basicConfig()` independently:
+### 1.2 Duplicate Logging Configuration ✓ ACCEPTABLE
+**12 engine modules** call `logging.basicConfig()` in test blocks:
 
 ```
-src/engines/backtest_engine.py
-src/engines/backtest_report_exporter.py
-src/engines/dynamic_tp_manager.py
-src/engines/execution_engine.py
-src/engines/execution_guard_engine.py
-src/engines/indicator_engine.py
-src/engines/market_context_engine.py
-src/engines/market_data_service.py
-src/engines/pattern_engine.py
-src/engines/risk_engine.py
-src/engines/state_manager.py
-src/engines/strategy_engine.py
+src/engines/backtest_engine.py - in if __name__ == "__main__"
+src/engines/backtest_report_exporter.py - in if __name__ == "__main__"
+src/engines/dynamic_tp_manager.py - in if __name__ == "__main__"
+src/engines/execution_engine.py - in if __name__ == "__main__"
+src/engines/execution_guard_engine.py - in if __name__ == "__main__"
+src/engines/indicator_engine.py - in if __name__ == "__main__"
+src/engines/market_context_engine.py - in if __name__ == "__main__"
+src/engines/market_data_service.py - in if __name__ == "__main__"
+src/engines/pattern_engine.py - in if __name__ == "__main__"
+src/engines/risk_engine.py - in if __name__ == "__main__"
+src/engines/state_manager.py - in if __name__ == "__main__"
+src/engines/strategy_engine.py - in if __name__ == "__main__"
 ```
 
-**Impact**: Last call wins; inconsistent log formatting across modules; breaks centralized logging strategy
+**Impact**: NONE - All calls are in `if __name__ == "__main__"` test harness blocks, which is the correct pattern for standalone module testing
 
-**Recommendation**: 
-- Remove all `logging.basicConfig()` calls from engine modules
-- Configure logging once in `main.py` or dedicated logger module
-- Use `logger = logging.getLogger(__name__)` pattern
+**Status**: This is NOT a problem. The pattern is correct.
 
 ### 1.3 Generic Exception Handling
 **87+ instances** of `except Exception as e:` throughout codebase
@@ -169,30 +166,33 @@ def load_config():
 
 ## 3. SECURITY VULNERABILITIES ⚠️ HIGH
 
-### 3.1 Plain Text Credentials
-MT5 credentials stored in `config.py` defaults:
+### 3.1 Plain Text Credentials ⚠️ MEDIUM
+MT5 credentials can be stored in config files, but environment variables ARE supported:
 
 ```python
-"mt5": {
-    "login": None,      # Could be hardcoded
-    "password": None,   # Plain text password
-    "server": None,
-    # ...
-}
+# From config.py:
+def apply_env_overrides(self, logger: logging.Logger) -> None:
+    env_login = os.getenv("MT5_LOGIN")
+    env_password = os.getenv("MT5_PASSWORD")
+    env_server = os.getenv("MT5_SERVER")
+    env_terminal_path = os.getenv("MT5_TERMINAL_PATH")
+    # Environment variables override config file values
 ```
 
-**Also checked**: Environment variables (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER)
+**Good Practices Already Implemented**:
+✓ Environment variable support (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_TERMINAL_PATH)
+✓ Environment variables override config file values
+✓ Config validation prevents None values
 
-**Vulnerabilities**:
-1. No encryption for stored credentials
-2. Credentials could be logged accidentally
-3. Config files might be committed to version control
-4. No secure keyring integration
+**Remaining Vulnerabilities**:
+1. No encryption for stored credentials in config files (if used)
+2. Credentials could be logged accidentally if full config is logged
+3. No secure keyring integration
 
 **Recommendation**:
-- Use environment variables ONLY (never hardcode)
-- Integrate with system keyring (Windows Credential Manager, macOS Keychain)
-- Add `.env` to `.gitignore`
+- Document that environment variables should be used for production (already works!)
+- Add warning in config if credentials are in plain text config file
+- Consider integrating with system keyring for additional security
 - Mask passwords in logs: `logger.info(f"Login: {login}, Password: {'*' * 8}")`
 
 ### 3.2 No Input Validation for MT5 Parameters
@@ -681,33 +681,33 @@ RISK_PERCENT
 
 ### 🔴 CRITICAL (Fix Immediately)
 
-1. **Consolidate TP engines** - Merge 5 TP engines into single source of truth
-2. **Remove duplicate logging.basicConfig()** - Configure once in main.py
-3. **Add custom exception hierarchy** - Replace generic `Exception` catches
-4. **Secure credentials** - Move to environment variables, add encryption
-5. **Fix bare except clauses** - ✓ COMPLETED
+1. ✅ **Fix bare except clauses** - COMPLETED (3 instances fixed)
+2. **Consolidate TP engines** - Merge 5 TP engines into single source of truth
+3. **Add custom exception hierarchy** - Replace generic `Exception` catches (87+ instances)
+4. **Add input validation for MT5 parameters** - Prevent invalid orders
+5. **Fix silent failures** - Escalate errors instead of returning defaults
 
 ### ⚠️ HIGH (Fix This Sprint)
 
-6. **Add input validation for MT5 parameters** - Prevent invalid orders
-7. **Implement dependency injection** - Reduce coupling in main.py
-8. **Add main.py integration tests** - Cover orchestration logic
-9. **Fix silent failures** - Escalate errors instead of returning defaults
-10. **Validate configuration schema** - Use pydantic or similar
+6. **Implement dependency injection** - Reduce coupling in main.py
+7. **Add main.py integration tests** - Cover orchestration logic
+8. **Fix recovery engine** - Verify MT5 positions before restoring state
+9. **Validate configuration schema** - Use pydantic or similar
+10. **Implement retry logic** - Exponential backoff for MT5 connections
 
 ### 📋 MEDIUM (Fix Next Sprint)
 
-11. **Extract main.py documentation** - Move to separate markdown files
-12. **Add architecture diagrams** - Document system design visually
-13. **Optimize file I/O** - Write only when state changes
-14. **Implement market data caching** - Reduce MT5 API calls
-15. **Fix recovery engine** - Verify MT5 positions before restoring state
+11. **Improve credential security** - Add warnings for plain text config
+12. **Extract main.py documentation** - Move 429 lines to separate markdown files
+13. **Add architecture diagrams** - Document system design visually
+14. **Optimize file I/O** - Write only when state changes
+15. **Implement market data caching** - Reduce MT5 API calls
 
 ### 📝 LOW (Technical Debt)
 
 16. **Standardize docstrings** - Consistent documentation format
-17. **Deprecate legacy config** - Remove dual config system
-18. **Add environment variable support** - Support all config via env vars
+17. **Deprecate legacy config** - Remove dual config system (if exists)
+18. **Add more environment variable support** - Support all config via env vars
 19. **Resolve TODO comments** - Fix known bugs in backtest_chart.py, main_window.py
 20. **Reduce UIUpdateQueue size** - Optimize memory usage
 
@@ -715,14 +715,14 @@ RISK_PERCENT
 
 ## METRICS AFTER FIXES
 
-| Metric | Before | After (Target) | Status |
-|--------|--------|----------------|--------|
-| Bare except clauses | 3 | 0 | ✓ DONE |
-| Duplicate logging configs | 12 | 1 | Pending |
-| TP engines | 5 | 1 | Pending |
-| Security issues | 3 HIGH | 0 | Pending |
-| Test coverage (main.py) | 0% | >80% | Pending |
-| Generic exception catches | 87+ | <10 | Pending |
+| Metric | Before | After (Current) | Target | Status |
+|--------|--------|-----------------|--------|--------|
+| Bare except clauses | 3 | 0 | 0 | ✅ DONE |
+| Duplicate logging configs | 12 | 12 (in test blocks) | N/A | ✅ OK (not a problem) |
+| TP engines | 5 | 5 | 1 | ⏳ Pending |
+| Security issues | 3 HIGH | 2 MEDIUM | 0 | ⏳ Pending |
+| Test coverage (main.py) | 0% | 0% | >80% | ⏳ Pending |
+| Generic exception catches | 87+ | 87+ | <10 | ⏳ Pending |
 
 ---
 
@@ -730,15 +730,23 @@ RISK_PERCENT
 
 This trading application has a **solid foundation** but suffers from:
 1. **Architectural redundancy** (5 TP engines)
-2. **Security vulnerabilities** (plain text credentials, no input validation)
-3. **Code quality issues** (bare excepts, duplicate logging, generic exceptions)
-4. **Testing gaps** (main.py untested, missing integration tests)
+2. **Code quality issues** (generic exceptions, silent failures)
+3. **Testing gaps** (main.py untested, missing integration tests)
+4. **Input validation needed** (MT5 parameters, config schema)
 
-**Immediate actions**:
-- ✓ Fix bare except clauses (DONE)
-- Remove 12 duplicate logging.basicConfig() calls
+**Good practices already in place**:
+- ✅ Environment variable support for credentials
+- ✅ Proper logging pattern in all engines
+- ✅ Clean architecture with separated concerns
+
+**Immediate actions completed**:
+- ✅ Fixed bare except clauses (3 instances)
+- ✅ Corrected analysis (logging.basicConfig calls are in test blocks - acceptable)
+
+**Remaining critical work**:
 - Consolidate 5 TP engines into 1
-- Secure credential handling
+- Add custom exception hierarchy
+- Add input validation for MT5 parameters
 - Add comprehensive tests
 
 **Estimated effort**: 
