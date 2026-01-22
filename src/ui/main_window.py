@@ -485,74 +485,6 @@ class MainWindow(QMainWindow):
         self.table_positions.cellClicked.connect(self._on_position_cell_clicked)
         layout.addWidget(self.table_positions)
         
-        # RESPONSIVE_LAYOUT: TP Levels Details Panel (120-20vh height, compress on small screens)
-        tp_group = QGroupBox("Target Profit Levels")
-        tp_group.setMinimumHeight(120)
-        tp_group.setMaximumHeight(int(768 * 0.2))  # 20vh approximation
-        tp_layout = QVBoxLayout()
-        tp_layout.setContentsMargins(6, 6, 6, 6)
-        tp_layout.setSpacing(4)
-        
-        # TP1 with state badge (HIGH: TP_VALUES_INCONSISTENT mitigation)
-        tp1_h_layout = QHBoxLayout()
-        self.lbl_tp1_level = QLabel("TP1 (Risk 1:1): -")
-        self.lbl_tp1_level.setStyleSheet("font-size: 11px; padding: 4px; background-color: #1b5e20; color: white; border-radius: 3px;")
-        self.lbl_tp1_badge = QLabel("NOT_REACHED")
-        self.lbl_tp1_badge.setStyleSheet("font-size: 9px; padding: 2px 4px; background-color: #555; color: white; border-radius: 3px;")
-        tp1_h_layout.addWidget(self.lbl_tp1_level)
-        tp1_h_layout.addWidget(self.lbl_tp1_badge)
-        tp1_h_layout.addStretch()
-        tp_layout.addLayout(tp1_h_layout)
-        
-        # TP2 with state badge (HIGH: TP_VALUES_INCONSISTENT mitigation)
-        tp2_h_layout = QHBoxLayout()
-        self.lbl_tp2_level = QLabel("TP2 (Risk 1:2): -")
-        self.lbl_tp2_level.setStyleSheet("font-size: 11px; padding: 4px; background-color: #f57c00; color: white; border-radius: 3px;")
-        self.lbl_tp2_badge = QLabel("NOT_REACHED")
-        self.lbl_tp2_badge.setStyleSheet("font-size: 9px; padding: 2px 4px; background-color: #555; color: white; border-radius: 3px;")
-        tp2_h_layout.addWidget(self.lbl_tp2_level)
-        tp2_h_layout.addWidget(self.lbl_tp2_badge)
-        tp2_h_layout.addStretch()
-        tp_layout.addLayout(tp2_h_layout)
-        
-        # TP3 with state badge (HIGH: TP_VALUES_INCONSISTENT mitigation)
-        tp3_h_layout = QHBoxLayout()
-        self.lbl_tp3_level = QLabel("TP3 (Risk 1:3): -")
-        self.lbl_tp3_level.setStyleSheet("font-size: 11px; padding: 4px; background-color: #d32f2f; color: white; border-radius: 3px;")
-        self.lbl_tp3_badge = QLabel("NOT_REACHED")
-        self.lbl_tp3_badge.setStyleSheet("font-size: 9px; padding: 2px 4px; background-color: #555; color: white; border-radius: 3px;")
-        tp3_h_layout.addWidget(self.lbl_tp3_level)
-        tp3_h_layout.addWidget(self.lbl_tp3_badge)
-        tp3_h_layout.addStretch()
-        tp_layout.addLayout(tp3_h_layout)
-        
-        # Validation error badge (HIGH: TP_VALUES_INCONSISTENT mitigation)
-        self.lbl_tp_config_error = QLabel("")
-        self.lbl_tp_config_error.setStyleSheet("font-size: 10px; padding: 4px; background-color: #b71c1c; color: white; border-radius: 3px;")
-        self.lbl_tp_config_error.setVisible(False)
-        tp_layout.addWidget(self.lbl_tp_config_error)
-        
-        # TP Progress bars (MEDIUM: TP_PROGRESS_BARS_STATIC mitigation)
-        self.progress_tp1 = QLabel("TP1 Progress: 0%")
-        self.progress_tp1.setStyleSheet("font-size: 9px; padding: 2px; color: #aaa;")
-        tp_layout.addWidget(self.progress_tp1)
-        
-        self.progress_tp2 = QLabel("TP2 Progress: 0%")
-        self.progress_tp2.setStyleSheet("font-size: 9px; padding: 2px; color: #aaa;")
-        tp_layout.addWidget(self.progress_tp2)
-        
-        # Add scroll area for TP levels if needed
-        tp_scroll = QScrollArea()
-        tp_scroll.setWidget(tp_group)
-        tp_scroll.setWidgetResizable(True)
-        tp_scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-        """)
-        layout.addWidget(tp_scroll)
-        
         # RESPONSIVE_LAYOUT: TP Decision Panels (accordion, side-by-side for TP1/TP2)
         self.accordion_tp_panels = QWidget()
         # Arrange TP1 and TP2 panels side-by-side for clearer comparison
@@ -1146,13 +1078,7 @@ class MainWindow(QMainWindow):
                 if row < len(all_positions):
                     position = all_positions[row]
                     
-                    # Display TP levels with both price and cash targets (guard None formatting)
-                    tp1_cash_val = position.get('tp1_cash')
-                    tp2_cash_val = position.get('tp2_cash')
-                    tp3_cash_val = position.get('tp3_cash')
-                    tp1_cash = 0.0 if tp1_cash_val is None else tp1_cash_val
-                    tp2_cash = 0.0 if tp2_cash_val is None else tp2_cash_val
-                    tp3_cash = 0.0 if tp3_cash_val is None else tp3_cash_val
+                    # Get TP prices for decision panels
                     tp1_price = position.get('tp1_price')
                     tp2_price = position.get('tp2_price')
                     tp3_price = position.get('tp3_price')
@@ -1163,77 +1089,9 @@ class MainWindow(QMainWindow):
                     tp1_text = fmt_price(tp1_price)
                     tp2_text = fmt_price(tp2_price)
                     tp3_text = fmt_price(tp3_price)
-
-                    self.lbl_tp1_level.setText(f"TP1: {tp1_text} | Cash: {tp1_cash:.2f} USD")
-                    self.lbl_tp2_level.setText(f"TP2: {tp2_text} | Cash: {tp2_cash:.2f} USD")
-                    self.lbl_tp3_level.setText(f"TP3: {tp3_text} | Cash: {tp3_cash:.2f} USD")
                     
-                    # Display TP1 exit decision state
-                    # HIGH: TP_VALUES_INCONSISTENT - Validate TP monotonicity
-                    tp_config_valid = True
-                    if tp1_price is not None and tp2_price is not None and tp3_price is not None:
-                        direction = position.get('direction', 1)
-                        if direction == 1:  # LONG
-                            if not (tp1_price < tp2_price < tp3_price):
-                                tp_config_valid = False
-                                self.lbl_tp_config_error.setText(f"INVALID TP CONFIG: {tp1_price:.2f} < {tp2_price:.2f} < {tp3_price:.2f}")
-                                self.lbl_tp_config_error.setVisible(True)
-                        else:  # SHORT
-                            if not (tp1_price > tp2_price > tp3_price):
-                                tp_config_valid = False
-                                self.lbl_tp_config_error.setText(f"INVALID TP CONFIG: {tp1_price:.2f} > {tp2_price:.2f} > {tp3_price:.2f}")
-                                self.lbl_tp_config_error.setVisible(True)
-                    
-                    if tp_config_valid:
-                        self.lbl_tp_config_error.setVisible(False)
-                    
-                    # MEDIUM: TP_PROGRESS_BARS_STATIC - Calculate progress ratios
-                    current_price = position.get('price_current', position.get('entry_price', 0))
-                    entry_price = position.get('entry_price', current_price)
-                    
-                    if tp1_price is not None and entry_price != current_price:
-                        tp1_progress = ((current_price - entry_price) / (tp1_price - entry_price)) if (tp1_price - entry_price) != 0 else 0
-                        tp1_progress = max(0.0, min(1.0, tp1_progress))  # Clamp to [0, 1]
-                        self.progress_tp1.setText(f"TP1 Progress: {int(tp1_progress * 100)}%")
-                    else:
-                        self.progress_tp1.setText("TP1 Progress: 0%")
-                    
-                    if tp2_price is not None and entry_price != current_price:
-                        tp2_progress = ((current_price - entry_price) / (tp2_price - entry_price)) if (tp2_price - entry_price) != 0 else 0
-                        tp2_progress = max(0.0, min(1.0, tp2_progress))  # Clamp to [0, 1]
-                        self.progress_tp2.setText(f"TP2 Progress: {int(tp2_progress * 100)}%")
-                    else:
-                        self.progress_tp2.setText("TP2 Progress: 0%")
-                    
-                    # Update TP state badges (TP_STATE_BADGES component)
+                    # Get TP state
                     tp_state = position.get('tp_state', 'IN_TRADE')
-                    tp_state_badge_map = {
-                        'IN_TRADE': 'NOT_REACHED',
-                        'TP1_REACHED': 'TOUCHED',
-                        'TP2_REACHED': 'ACTIVE_MANAGEMENT',
-                        'TP3_REACHED': 'EXIT_ARMED',
-                        'EXIT_EXECUTED': 'COMPLETED'
-                    }
-                    tp1_badge_text = tp_state_badge_map.get(tp_state, 'NOT_REACHED')
-                    tp2_badge_text = tp_state_badge_map.get(tp_state, 'NOT_REACHED')
-                    tp3_badge_text = tp_state_badge_map.get(tp_state, 'NOT_REACHED')
-                    
-                    self.lbl_tp1_badge.setText(tp1_badge_text)
-                    self.lbl_tp2_badge.setText(tp2_badge_text)
-                    self.lbl_tp3_badge.setText(tp3_badge_text)
-                    
-                    # Color badges by state
-                    badge_colors = {
-                        'NOT_REACHED': '#666666',
-                        'TOUCHED': '#1b5e20',
-                        'ACTIVE_MANAGEMENT': '#f57c00',
-                        'EXIT_ARMED': '#d32f2f',
-                        'COMPLETED': '#0d47a1'
-                    }
-                    badge_color = badge_colors.get(tp1_badge_text, '#666666')
-                    self.lbl_tp1_badge.setStyleSheet(f"font-size: 9px; padding: 2px 4px; background-color: {badge_color}; color: white; border-radius: 3px;")
-                    self.lbl_tp2_badge.setStyleSheet(f"font-size: 9px; padding: 2px 4px; background-color: {badge_color}; color: white; border-radius: 3px;")
-                    self.lbl_tp3_badge.setStyleSheet(f"font-size: 9px; padding: 2px 4px; background-color: {badge_color}; color: white; border-radius: 3px;")
                     
                     # HIGH: TP_DECISION_PANELS_EMPTY - Bind to TP engine state with defaults
                     post_tp1_decision = position.get('post_tp1_decision', 'NOT_REACHED')  # Default indicates no TP1 yet
@@ -1805,11 +1663,6 @@ class MainWindow(QMainWindow):
             self.lbl_position_status.setStyleSheet("color: gray;")
             self.table_positions.setRowCount(0)
             self.btn_close_position.setEnabled(False)
-            # Reset TP level labels to defaults
-            self.lbl_tp1_level.setText("TP1 (Risk 1:1): -")
-            self.lbl_tp2_level.setText("TP2 (Risk 1:2): -")
-            self.lbl_tp3_level.setText("TP3 (Risk 1:3): -")
-            self.lbl_tp_config_error.setVisible(False)
     
     def _refresh_positions_table(self):
         """Refresh the positions table from controller."""
