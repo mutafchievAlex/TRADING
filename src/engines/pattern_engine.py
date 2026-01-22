@@ -190,7 +190,10 @@ class PatternEngine:
             pivot_lows = self.find_pivot_lows(df)
             pivot_highs = self.find_pivot_highs(df)
             
+            self.logger.debug(f"detect_double_bottom: Found {len(pivot_lows)} lows, {len(pivot_highs)} highs")
+            
             if len(pivot_lows) < 2 or len(pivot_highs) < 1:
+                self.logger.debug(f"Insufficient pivots: lows={len(pivot_lows)}, highs={len(pivot_highs)}")
                 return None
             
             # Search for Double Bottom pattern (start from most recent)
@@ -230,11 +233,12 @@ class PatternEngine:
                                                 ((left_low['price'] + right_low['price']) / 2) * 100
                     }
                     
-                    self.logger.info(f"Double Bottom detected: Left={left_low['price']:.2f}, "
+                    self.logger.info(f"✓ Double Bottom detected: Left={left_low['price']:.2f}, "
                                    f"Right={right_low['price']:.2f}, Neckline={neckline['price']:.2f}")
                     return pattern
             
             # No valid pattern found
+            self.logger.debug(f"No valid Double Bottom pattern found")
             return None
             
         except Exception as e:

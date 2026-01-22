@@ -59,7 +59,7 @@ MIN_BARS_BETWEEN_PIVOTS = 10  # Minimum bars between detected pivots
 # ============================================================================
 
 COOLDOWN_HOURS = 24  # Cooldown period between trades (24 hours)
-MOMENTUM_ATR_THRESHOLD = 0.5  # ATR threshold for momentum filter
+MOMENTUM_ATR_THRESHOLD = 0.3  # ATR threshold for momentum filter
 MIN_PIPS_MOVEMENT = 0.5  # Minimum price movement in pips
 ANTI_FOMO_BARS = 10  # Bars after signal to wait (warning only, doesn't block)
 

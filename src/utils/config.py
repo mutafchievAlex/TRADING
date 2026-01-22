@@ -86,7 +86,7 @@ def _default_config_dict() -> Dict[str, Any]:
             "min_bars_between": 10,
             "atr_multiplier_stop": 2.0,
             "risk_reward_ratio": 2.0,
-            "momentum_atr_threshold": 0.5,
+            "momentum_atr_threshold": 0.3,
             "cooldown_hours": 24,
             "pyramiding": 1,
         },

@@ -665,6 +665,12 @@ class TradingController(QObject):
             # Sync persisted cooldown so restarts do not reset it
             if self.state_manager.last_trade_time:
                 self.strategy_engine.last_trade_time = self.state_manager.last_trade_time
+                self.logger.info(
+                    f"COOLDOWN SYNC: Restored last_trade_time from state: {self.state_manager.last_trade_time} "
+                    f"(type: {type(self.state_manager.last_trade_time).__name__})"
+                )
+            else:
+                self.logger.info("COOLDOWN SYNC: No previous trades, cooldown not applicable")
             
             # Recovery engine
             recovery_bars = self.config.get('recovery.recovery_bars', 50)
@@ -778,11 +784,16 @@ class TradingController(QObject):
             self.is_connected = False
             self.logger.info("Disconnected from MT5")
             
+            # Update UI if available (thread-safe)
             if self.window:
                 self.ui_queue.post_event(UIEventType.UPDATE_CONNECTION_STATUS, {'connected': False, 'account_info': None})
                 
         except Exception as e:
             self.logger.error(f"Error disconnecting from MT5: {e}")
+    
+    def disconnect_from_mt5(self):
+        """Alias for disconnect_mt5 (for backwards compatibility)."""
+        self.disconnect_mt5()
     
     def start_trading(self):
         """Start the trading loop."""
@@ -1246,9 +1257,15 @@ class TradingController(QObject):
                 # Monitor existing positions
                 self._monitor_positions(current_bar)
             
+            # ALWAYS evaluate entry conditions for UI display (even if pyramid limit reached)
+            self._evaluate_and_display_entry_conditions(df, pattern, current_bar)
+            
             if can_open_new:
-                # Look for entry opportunities (can still enter if under pyramiding limit)
-                self._check_entry(df, pattern, current_bar)
+                # Execute entry if conditions met and pyramid limit allows
+                self.logger.debug(f"Can open new position: {can_open_new}, pyramid limit: {pyramiding}")
+                self._check_entry_execution(df, pattern, current_bar)
+            else:
+                self.logger.debug(f"Cannot open new position: pyramid limit reached ({self.state_manager.get_position_count()}/{pyramiding})")
             
             # 5. Update UI
             self._update_ui(current_bar, current_indicators, pattern)
@@ -1384,38 +1401,56 @@ class TradingController(QObject):
         except Exception as e:
             self.logger.debug(f"Error in continuous update: {e}")
     
-    def _check_entry(self, df, pattern, current_bar):
-        """Check for entry signal and execute trade if conditions met."""
+    def _evaluate_and_display_entry_conditions(self, df, pattern, current_bar):
+        """
+        Evaluate entry conditions and update UI display.
+        
+        This runs on EVERY bar to keep the UI updated, regardless of pyramid limits.
+        Does NOT execute trades - only evaluates and displays conditions.
+        """
         try:
-            # Evaluate entry conditions with performance timing
-            entry_timer = f"entry_eval_{int(time.time() * 1000) % 100000}"
-            self.performance_monitor.start_timer(entry_timer)
-            
+            # Evaluate entry conditions (without execution)
             should_enter, entry_details = self.strategy_engine.evaluate_entry(
                 df, pattern, current_bar_index=-2
             )
             
-            decision_latency_ms = self.performance_monitor.end_timer(
-                entry_timer, OperationType.ENTRY_EVALUATION
-            )
-            self.metrics_tracker.record_latency_ms(decision_latency_ms)
-            self.metrics_tracker.record_decision()
-            
-            # Update UI with entry conditions (thread-safe)
+            # Always update UI with current entry conditions
             if self.window:
                 self.ui_queue.post_event(UIEventType.UPDATE_ENTRY_CONDITIONS, {'conditions': entry_details})
                 self.ui_queue.post_event(UIEventType.UPDATE_PATTERN_STATUS, {'pattern': pattern})
             
+            self.logger.debug(
+                f"Entry conditions: Pattern={entry_details.get('pattern_valid')}, "
+                f"Breakout={entry_details.get('breakout_confirmed')}, "
+                f"Trend={entry_details.get('above_ema50')}, "
+                f"Momentum={entry_details.get('has_momentum')}, "
+                f"Cooldown={entry_details.get('cooldown_ok')}"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error evaluating entry conditions for display: {e}", exc_info=True)
+    
+    def _check_entry_execution(self, df, pattern, current_bar):
+        """
+        Check if entry should be executed (called only when pyramid limit allows).
+        
+        This is separated from evaluation so UI can show conditions even when
+        we can't enter due to pyramid limits.
+        """
+        try:
+            # Re-evaluate entry (performance note: cached in strategy_engine if same bar)
+            should_enter, entry_details = self.strategy_engine.evaluate_entry(
+                df, pattern, current_bar_index=-2
+            )
+            
             # Log decision
             if not should_enter:
                 self.logger.info(
-                    "Decision outcome: reject reason=%s",
-                    entry_details.get("reason", "Unknown"),
+                    f"Entry conditions NOT met - Reason: {entry_details.get('reason', 'Unknown')}"
                 )
                 return
             
             # Entry signal detected
-            self.logger.info("Decision outcome: enter")
             self.logger.info("ENTRY SIGNAL DETECTED")
             self.trading_logger.log_trade({
                 'type': 'SIGNAL',
@@ -1424,8 +1459,9 @@ class TradingController(QObject):
             })
             
             # Check auto-trade setting
-            if not self.config.get('mode.auto_trade', False):
-                self.logger.info("Auto-trade disabled - signal logged only")
+            auto_trade_enabled = self.config.get('mode.auto_trade', False)
+            if not auto_trade_enabled:
+                self.logger.info("⚠️  AUTO-TRADE DISABLED - Entry signal logged but not executed")
                 if self.window:
                     self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': "ENTRY SIGNAL - Auto-trade disabled"})
                 return
@@ -1434,17 +1470,30 @@ class TradingController(QObject):
             self._execute_entry(entry_details)
             
         except Exception as e:
-            self.logger.error(f"Error checking entry: {e}", exc_info=True)
+            self.logger.error(f"Error checking entry execution: {e}", exc_info=True)
+    
+    def _check_entry(self, df, pattern, current_bar):
+        """
+        DEPRECATED: Use _evaluate_and_display_entry_conditions + _check_entry_execution.
+        
+        This method is kept for backward compatibility but redirects to new methods.
+        """
+        self._evaluate_and_display_entry_conditions(df, pattern, current_bar)
+        self._check_entry_execution(df, pattern, current_bar)
     
     def _execute_entry(self, entry_details: dict):
         """Execute entry order."""
         try:
+            self.logger.info(f"🔵 _execute_entry called: Entry={entry_details.get('entry_price'):.2f}")
+            
             # Safety check: verify demo mode if account is not demo
             account_info = self.market_data.get_account_info()
             if account_info:
                 server = account_info.get('server', '').lower()
                 is_demo_account = 'demo' in server
                 demo_mode_enabled = self.config.get('mode.demo_mode', True)
+                
+                self.logger.debug(f"Account mode check: is_demo={is_demo_account}, demo_mode_enabled={demo_mode_enabled}")
                 
                 if not is_demo_account and demo_mode_enabled:
                     self.logger.warning("BLOCKED: Demo Mode is ON but account is LIVE. Disable Demo Mode to trade live.")
@@ -1475,6 +1524,8 @@ class TradingController(QObject):
                 self.logger.error("Position size calculation failed")
                 return
             
+            self.logger.info(f"Calculated position size: {position_size} lots")
+            
             # Pre-compute TP levels using planned entry for order placement
             planned_tp_levels = self.strategy_engine.multi_level_tp.calculate_tp_levels(
                 entry_price=entry_details['entry_price'],
@@ -1483,6 +1534,8 @@ class TradingController(QObject):
             )
             planned_tp3 = planned_tp_levels.get('tp3', entry_details['take_profit']) if planned_tp_levels else entry_details['take_profit']
 
+            self.logger.info(f"Sending BUY order: Volume={position_size}, TP3={planned_tp3:.2f}")
+            
             # Send order
             order_result = self.execution_engine.send_market_order(
                 order_type="BUY",
@@ -1492,88 +1545,96 @@ class TradingController(QObject):
                 comment="Double Bottom Entry"
             )
             
-            if order_result:
-                # Get position from MT5 to get actual execution price
-                ticket = order_result['order']
-                time.sleep(0.1)  # Wait for MT5 to register position
-                
-                mt5_position = None
-                live_positions = self.execution_engine.get_open_positions()
-                for pos in live_positions:
-                    if pos['ticket'] == ticket:
-                        mt5_position = pos
-                        break
-                
-                # Use actual execution price from MT5, fallback to order_result price
-                actual_entry_price = mt5_position['price_open'] if mt5_position else order_result['price']
-                
-                # Calculate multi-level TP levels using actual entry
-                tp_levels = self.strategy_engine.multi_level_tp.calculate_tp_levels(
-                    entry_price=actual_entry_price,
-                    stop_loss=entry_details['stop_loss'],
-                    direction=1  # LONG only
-                )
+            if not order_result:
+                self.logger.error("Order execution FAILED - order_result is None")
+                return
+            
+            if not order_result.get('order'):
+                self.logger.error(f"Order execution FAILED - {order_result}")
+                return
+            
+            self.logger.info(f"✓ Order accepted: Ticket={order_result['order']}, Price={order_result['price']:.2f}")
+            
+            # Get position from MT5 to get actual execution price
+            ticket = order_result['order']
+            time.sleep(0.1)  # Wait for MT5 to register position
+            
+            mt5_position = None
+            live_positions = self.execution_engine.get_open_positions()
+            for pos in live_positions:
+                if pos['ticket'] == ticket:
+                    mt5_position = pos
+                    break
+            
+            # Use actual execution price from MT5, fallback to order_result price
+            actual_entry_price = mt5_position['price_open'] if mt5_position else order_result['price']
+            
+            # Calculate multi-level TP levels using actual entry
+            tp_levels = self.strategy_engine.multi_level_tp.calculate_tp_levels(
+                entry_price=actual_entry_price,
+                stop_loss=entry_details['stop_loss'],
+                direction=1  # LONG only
+            )
 
-                # Use priority TP3 (from settings) as order take-profit
-                take_profit_price = tp_levels.get('tp3', entry_details['take_profit']) if tp_levels else entry_details['take_profit']
-                
-                # Record position in state manager
-                self.state_manager.open_position({
-                    'ticket': ticket,
-                    'entry_price': actual_entry_price,
-                    'price_current': actual_entry_price,  # Initial value = entry price
-                    'stop_loss': entry_details['stop_loss'],
-                    'take_profit': take_profit_price,
-                    'volume': position_size,
-                    'profit': 0.0,  # Initial value = 0
-                    'entry_time': datetime.now(),
-                    'atr': entry_details.get('atr'),
-                    # Multi-level TP fields
-                    'direction': 1,  # LONG
-                    'tp_state': 'IN_TRADE',
-                    'tp1_price': tp_levels.get('tp1'),
-                    'tp2_price': tp_levels.get('tp2'),
-                    'tp3_price': tp_levels.get('tp3'),
-                    'current_stop_loss': entry_details['stop_loss'],
-                })
-                
-                # Update strategy cooldown
-                self.strategy_engine.update_last_trade_time(datetime.now())
-                
-                # Log trade
-                self.trading_logger.log_trade({
-                    'type': 'ENTRY',
-                    'ticket': ticket,
-                    'entry_price': actual_entry_price,
-                    'stop_loss': entry_details['stop_loss'],
-                    'take_profit': entry_details['take_profit'],
-                    'volume': position_size,
-                    'pattern_type': 'Double Bottom'
-                })
-                
-                self.logger.info(
-                    "Order result: success ticket=%s entry=%.5f",
-                    ticket,
-                    actual_entry_price,
-                )
-                
-                # Send alert for position opened
-                self.alert_manager.alert_position_opened({
-                    'ticket': ticket,
-                    'entry_price': actual_entry_price,
-                    'stop_loss': entry_details['stop_loss'],
-                    'take_profit': take_profit_price,
-                    'volume': position_size
-                })
-                
-                if self.window:
-                    self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"TRADE OPENED: Ticket {ticket} @ {actual_entry_price:.5f}"})
-                    # Update position display with all open positions
-                    all_positions = self.state_manager.get_all_positions()
-                    if all_positions:
-                        self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': all_positions})
-            else:
-                self.logger.error("Order result: failure")
+            # Use priority TP3 (from settings) as order take-profit
+            take_profit_price = tp_levels.get('tp3', entry_details['take_profit']) if tp_levels else entry_details['take_profit']
+            
+            # Record position in state manager
+            self.state_manager.open_position({
+                'ticket': ticket,
+                'entry_price': actual_entry_price,
+                'price_current': actual_entry_price,  # Initial value = entry price
+                'stop_loss': entry_details['stop_loss'],
+                'take_profit': take_profit_price,
+                'volume': position_size,
+                'profit': 0.0,  # Initial value = 0
+                'entry_time': datetime.now(),
+                'atr': entry_details.get('atr'),
+                # Multi-level TP fields
+                'direction': 1,  # LONG
+                'tp_state': 'IN_TRADE',
+                'tp1_price': tp_levels.get('tp1'),
+                'tp2_price': tp_levels.get('tp2'),
+                'tp3_price': tp_levels.get('tp3'),
+                'current_stop_loss': entry_details['stop_loss'],
+            })
+            
+            # Update strategy cooldown
+            self.strategy_engine.update_last_trade_time(datetime.now())
+            
+            # Log trade
+            self.trading_logger.log_trade({
+                'type': 'ENTRY',
+                'ticket': ticket,
+                'entry_price': actual_entry_price,
+                'stop_loss': entry_details['stop_loss'],
+                'take_profit': entry_details['take_profit'],
+                'volume': position_size,
+                'pattern_type': 'Double Bottom'
+            })
+            
+            self.logger.info(
+                "Order result: success ticket=%s entry=%.5f",
+                ticket,
+                actual_entry_price,
+            )
+            
+            # Send alert for position opened
+            self.alert_manager.alert_position_opened({
+                'ticket': ticket,
+                'entry_price': actual_entry_price,
+                'stop_loss': entry_details['stop_loss'],
+                'take_profit': take_profit_price,
+                'volume': position_size
+            })
+            
+            if self.window:
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {'message': f"TRADE OPENED: Ticket {ticket} @ {actual_entry_price:.5f}"})
+                # Update position display with all open positions
+                all_positions = self.state_manager.get_all_positions()
+                if all_positions:
+                    self.ui_queue.post_event(UIEventType.UPDATE_POSITION_DISPLAY, {'positions': all_positions})
+            
             self.metrics_tracker.record_order_result(bool(order_result))
                 
         except Exception as e:
@@ -1639,6 +1700,91 @@ class TradingController(QObject):
                         momentum_state=position_data.get('momentum_state'),
                         last_closed_bar=current_bar if isinstance(current_bar, dict) else None
                     )
+                    
+                    # Capture TP1/TP2 exit decision metadata (NEW)
+                    post_tp1_decision = None
+                    tp1_exit_reason = None
+                    post_tp2_decision = None
+                    tp2_exit_reason = None
+                    trailing_sl_level = None
+                    trailing_sl_enabled = False
+                    
+                    # Always populate metadata based on current state
+                    if tp_state == 'IN_TRADE':
+                        # Position not yet at TP1
+                        post_tp1_decision = 'NOT_REACHED'
+                        tp1_exit_reason = f'Price at {current_bar["close"]:.2f}, TP1 at {tp_levels.get("tp1", 0):.2f}'
+                        post_tp2_decision = 'NOT_REACHED'
+                        tp2_exit_reason = 'Awaiting TP1 first'
+                        self.logger.debug(f"Ticket {ticket}: IN_TRADE - TP1 not reached yet")
+                    
+                    # If TP1_REACHED, evaluate and capture TP1 decision metadata
+                    elif tp_state == 'TP1_REACHED' and not should_exit:
+                        # Call TP1 decision engine to get metadata (reason already returned by evaluate_exit)
+                        bars_since_tp = 1
+                        if position_data.get('tp_state_changed_at') and isinstance(current_bar, dict) and 'time' in current_bar:
+                            bars_since_tp = 0 if current_bar['time'] == position_data.get('tp_state_changed_at') else 1
+                        
+                        tp1_result = self.strategy_engine.evaluate_post_tp1_decision(
+                            current_price=current_bar['close'],
+                            entry_price=position_data['entry_price'],
+                            stop_loss=position_data.get('current_stop_loss', position_data['stop_loss']),
+                            tp1_price=tp_levels.get('tp1'),
+                            atr_14=position_data.get('atr', 0.0),
+                            market_regime=position_data.get('market_regime', 'BULL'),
+                            momentum_state=position_data.get('momentum_state', 'STRONG'),
+                            last_closed_bar=current_bar if isinstance(current_bar, dict) else {'close': current_bar['close']},
+                            bars_since_tp1=bars_since_tp
+                        )
+                        post_tp1_decision = tp1_result.get('decision')
+                        tp1_exit_reason = tp1_result.get('reason')
+                        self.logger.info(f"Ticket {ticket} TP1 Decision: {post_tp1_decision} - {tp1_exit_reason}")
+                    
+                    # If TP2_REACHED, evaluate and capture TP2 decision metadata
+                    elif tp_state == 'TP2_REACHED' and not should_exit:
+                        bars_since_tp = 1
+                        if position_data.get('tp_state_changed_at') and isinstance(current_bar, dict) and 'time' in current_bar:
+                            bars_since_tp = 0 if current_bar['time'] == position_data.get('tp_state_changed_at') else 1
+                        
+                        tp2_result = self.strategy_engine.evaluate_post_tp2_decision(
+                            current_price=current_bar['close'],
+                            entry_price=position_data['entry_price'],
+                            stop_loss=position_data.get('current_stop_loss', position_data['stop_loss']),
+                            tp2_price=tp_levels.get('tp2'),
+                            tp3_price=tp_levels.get('tp3'),
+                            tp1_price=tp_levels.get('tp1'),
+                            atr_14=position_data.get('atr', 0.0),
+                            market_regime=position_data.get('market_regime', 'BULL'),
+                            momentum_state=position_data.get('momentum_state', 'STRONG'),
+                            structure_state='HIGHER_LOWS',
+                            last_closed_bar=current_bar if isinstance(current_bar, dict) else {'close': current_bar['close']},
+                            bars_since_tp2=bars_since_tp
+                        )
+                        post_tp2_decision = tp2_result.get('decision')
+                        tp2_exit_reason = tp2_result.get('reason')
+                        trailing_sl_level = tp2_result.get('trailing_sl')
+                        trailing_sl_enabled = trailing_sl_level is not None
+                        self.logger.info(f"Ticket {ticket} TP2 Decision: {post_tp2_decision} - {tp2_exit_reason}")
+                        if trailing_sl_level:
+                            self.logger.info(f"Ticket {ticket} Trailing SL: {trailing_sl_level:.2f} ({'ACTIVE' if trailing_sl_enabled else 'INACTIVE'})")
+                    
+                    # Update TP exit metadata in state (always update, not just when changed)
+                    self.state_manager.update_tp_exit_metadata(
+                        ticket=ticket,
+                        post_tp1_decision=post_tp1_decision,
+                        tp1_exit_reason=tp1_exit_reason,
+                        post_tp2_decision=post_tp2_decision,
+                        tp2_exit_reason=tp2_exit_reason,
+                        trailing_sl_level=trailing_sl_level,
+                        trailing_sl_enabled=trailing_sl_enabled
+                    )
+                    # Update local position_data for immediate UI rendering (always, not conditionally)
+                    position_data['post_tp1_decision'] = post_tp1_decision
+                    position_data['tp1_exit_reason'] = tp1_exit_reason
+                    position_data['post_tp2_decision'] = post_tp2_decision
+                    position_data['tp2_exit_reason'] = tp2_exit_reason
+                    position_data['trailing_sl_level'] = trailing_sl_level
+                    position_data['trailing_sl_enabled'] = trailing_sl_enabled
                     
                     # Update TP state if changed
                     if new_tp_state != tp_state:
@@ -1910,6 +2056,59 @@ class TradingController(QObject):
         regardless of offline periods or unexpected shutdowns.
         """
         try:
+            # ============================================================
+            # AUTO-RECOVERY: DISABLED
+            # ============================================================
+            # Recovery Mode has been disabled because it has critical flaws:
+            #
+            # 1. Does NOT check if positions still exist in MT5
+            #    - Only validates TP/SL against current bar
+            #    - Positions closed on broker side remain in state.json
+            #    - Main loop (_monitor_positions) detects and closes them later
+            #
+            # 2. Closes positions based on CURRENT price, not historical data
+            #    - If price touched TP during offline period, recovery closes position
+            #    - But doesn't know when exactly it was hit (could be hours ago)
+            #    - This causes incorrect P&L calculation
+            #
+            # 3. Opens new positions after closing invalid ones
+            #    - If recovery closes positions, cooldown may be bypassed
+            #    - Can lead to unexpected entries immediately after restart
+            #
+            # SOLUTION: Let main loop handle position reconciliation naturally
+            # - _sync_live_positions() adds any broker positions not in state
+            # - _monitor_positions() removes state positions not in broker
+            # - This approach is safer and more accurate
+            # ============================================================
+            
+            self.logger.info("="*60)
+            self.logger.info("AUTO-RECOVERY: DISABLED")
+            self.logger.info("="*60)
+            self.logger.info("Positions will be preserved across restarts")
+            self.logger.info(f"Current open positions in state: {self.state_manager.get_position_count()}")
+            
+            # Get live broker positions for comparison
+            try:
+                live_positions = self.execution_engine.get_open_positions()
+                self.logger.info(f"Live positions on broker: {len(live_positions)}")
+                if live_positions:
+                    for lp in live_positions:
+                        self.logger.info(f"  - Ticket {lp['ticket']}: {lp['type']} @ {lp['price_current']:.2f}, P&L: ${lp['profit']:.2f}")
+            except Exception as e:
+                self.logger.warning(f"Could not fetch live positions: {e}")
+            
+            if self.state_manager.last_trade_time:
+                self.logger.info(f"Last trade time: {self.state_manager.last_trade_time}")
+                cooldown_hours = self.config.get('strategy.cooldown_hours', 24)
+                is_in_cooldown = self.state_manager.is_in_cooldown(datetime.now(), cooldown_hours)
+                cooldown_status = "ACTIVE" if is_in_cooldown else "PASSED"
+                self.logger.info(f"Cooldown status ({cooldown_hours}h): {cooldown_status}")
+            
+            self.logger.info("Positions will reconcile automatically in main loop")
+            self.logger.info("="*60)
+            return
+            
+            # Original recovery code (disabled)
             # Only perform recovery if there are open positions
             if not self.state_manager.has_open_position():
                 self.logger.info("No open positions - recovery not needed")

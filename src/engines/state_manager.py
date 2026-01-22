@@ -11,6 +11,7 @@ This module maintains the state of the trading system:
 
 import json
 import logging
+import threading
 from datetime import datetime
 from typing import Optional, Dict, List
 from pathlib import Path
@@ -54,6 +55,9 @@ class StateManager:
         self.db_url = db_url
         self.dev_mode = dev_mode
         self.db_store: Optional[StateDatabase] = None
+        
+        # Threading lock for synchronized indicator/state updates (prevents race conditions)
+        self._state_lock = threading.RLock()
 
         if self.dev_mode and self.storage_backend != "file":
             self.logger.warning(
@@ -98,12 +102,15 @@ class StateManager:
         """
         Register a new open position (supports pyramiding).
         
+        Thread-safe: Uses lock to prevent race conditions during concurrent updates.
+        
         Args:
             position_data: Dict with position details
                 Required keys: ticket, entry_price, stop_loss, take_profit, volume
         """
         try:
-            new_position = {
+            with self._state_lock:
+                new_position = {
                 'ticket': position_data['ticket'],
                 'entry_price': position_data['entry_price'],
                 'stop_loss': position_data['stop_loss'],
@@ -163,7 +170,7 @@ class StateManager:
                       symbol_info: Optional[Dict] = None, risk_engine: Optional[object] = None,
                       swap: Optional[float] = None):
         """
-        Close a position and record the trade.
+        Close a position and record the trade (thread-safe).
         
         Args:
             exit_price: Exit price
@@ -175,116 +182,117 @@ class StateManager:
             swap: Optional swap value from broker
         """
         try:
-            if not self.open_positions:
-                self.logger.warning("No positions to close")
-                return
-            
-            if exit_time is None:
-                exit_time = datetime.now()
-            
-            # Find position to close
-            position_to_close = None
-            if ticket:
-                for pos in self.open_positions:
-                    if pos['ticket'] == ticket:
-                        position_to_close = pos
-                        break
-            else:
-                position_to_close = self.open_positions[0]  # Close first position
-            
-            if not position_to_close:
-                self.logger.warning(f"Position with ticket {ticket} not found")
-                return
-            
-            # Calculate P&L
-            entry_price = position_to_close['entry_price']
-            volume = position_to_close['volume']
-            direction = position_to_close.get('direction', 1)
-            price_diff = (exit_price - entry_price) * direction
+            with self._state_lock:
+                if not self.open_positions:
+                    self.logger.warning("No positions to close")
+                    return
+                
+                if exit_time is None:
+                    exit_time = datetime.now()
+                
+                # Find position to close
+                position_to_close = None
+                if ticket:
+                    for pos in self.open_positions:
+                        if pos['ticket'] == ticket:
+                            position_to_close = pos
+                            break
+                else:
+                    position_to_close = self.open_positions[0]  # Close first position
+                
+                if not position_to_close:
+                    self.logger.warning(f"Position with ticket {ticket} not found")
+                    return
+                
+                # Calculate P&L
+                entry_price = position_to_close['entry_price']
+                volume = position_to_close['volume']
+                direction = position_to_close.get('direction', 1)
+                price_diff = (exit_price - entry_price) * direction
 
-            contract_size = 100.0
-            point_value = None
-            if symbol_info:
-                contract_size = symbol_info.get('trade_contract_size', contract_size)
-                tick_value = symbol_info.get('tick_value')
-                tick_size = symbol_info.get('tick_size') or symbol_info.get('point')
-                if tick_value is not None and tick_size:
-                    point_value = tick_value / tick_size
+                contract_size = 100.0
+                point_value = None
+                if symbol_info:
+                    contract_size = symbol_info.get('trade_contract_size', contract_size)
+                    tick_value = symbol_info.get('tick_value')
+                    tick_size = symbol_info.get('tick_size') or symbol_info.get('point')
+                    if tick_value is not None and tick_size:
+                        point_value = tick_value / tick_size
 
-            if point_value is None:
-                point_value = contract_size
+                if point_value is None:
+                    point_value = contract_size
 
-            commission_total = 0.0
-            if risk_engine and symbol_info:
-                adjusted_exit = exit_price if direction == 1 else (entry_price - (exit_price - entry_price))
-                pl_result = risk_engine.calculate_potential_profit_loss(
-                    position_size=volume,
-                    entry_price=entry_price,
-                    exit_price=adjusted_exit,
-                    symbol_info=symbol_info
-                )
-                gross_pl = pl_result.get('gross_pl', 0.0)
-                commission_total = pl_result.get('commission', 0.0)
-            else:
-                gross_pl = price_diff * volume * point_value
-                if risk_engine:
-                    commission_total = risk_engine.commission_per_lot * volume * 2
-                elif position_to_close.get('commission') is not None:
-                    commission_total = position_to_close.get('commission', 0.0)
+                commission_total = 0.0
+                if risk_engine and symbol_info:
+                    adjusted_exit = exit_price if direction == 1 else (entry_price - (exit_price - entry_price))
+                    pl_result = risk_engine.calculate_potential_profit_loss(
+                        position_size=volume,
+                        entry_price=entry_price,
+                        exit_price=adjusted_exit,
+                        symbol_info=symbol_info
+                    )
+                    gross_pl = pl_result.get('gross_pl', 0.0)
+                    commission_total = pl_result.get('commission', 0.0)
+                else:
+                    gross_pl = price_diff * volume * point_value
+                    if risk_engine:
+                        commission_total = risk_engine.commission_per_lot * volume * 2
+                    elif position_to_close.get('commission') is not None:
+                        commission_total = position_to_close.get('commission', 0.0)
 
-            if point_value is not None and point_value != contract_size:
-                gross_pl = price_diff * volume * point_value
+                if point_value is not None and point_value != contract_size:
+                    gross_pl = price_diff * volume * point_value
 
-            swap_value = swap if swap is not None else position_to_close.get('swap', 0.0)
-            net_pl = gross_pl - commission_total + swap_value
+                swap_value = swap if swap is not None else position_to_close.get('swap', 0.0)
+                net_pl = gross_pl - commission_total + swap_value
 
-            normalized_exit_reason = self._normalize_exit_reason(exit_reason)
-            
-            # Create trade record
-            trade_record = {
-                'ticket': position_to_close['ticket'],
-                'entry_time': position_to_close['entry_time'].isoformat() 
-                             if isinstance(position_to_close['entry_time'], datetime) 
-                             else position_to_close['entry_time'],
-                'exit_time': exit_time.isoformat() if isinstance(exit_time, datetime) else exit_time,
-                'entry_price': entry_price,
-                'exit_price': exit_price,
-                'stop_loss': position_to_close['stop_loss'],
-                'take_profit': position_to_close['take_profit'],
-                'volume': volume,
-                'profit': net_pl,
-                'gross_pl': gross_pl,
-                'commission': commission_total,
-                'swap': swap_value,
-                'net_pl': net_pl,
-                'exit_reason': normalized_exit_reason,
-                'pattern_info': position_to_close.get('pattern_info'),
-                'is_winner': net_pl > 0
-            }
-            
-            # Debug log - verify exit_reason is text, not a price
-            self.logger.info(f"Trade record created: ticket={trade_record['ticket']}, "
-                           f"exit_reason='{normalized_exit_reason}' (type: {type(normalized_exit_reason).__name__}), "
-                           f"take_profit={trade_record['take_profit']}")
-            
-            # Update statistics
-            self.trade_history.append(trade_record)
-            self.total_trades += 1
-            self.total_profit += net_pl
-            
-            if net_pl > 0:
-                self.winning_trades += 1
-            else:
-                self.losing_trades += 1
-            
-            self.logger.info(f"Position closed: Ticket={trade_record['ticket']}, "
-                           f"Profit=${net_pl:.2f}, Reason={normalized_exit_reason}, "
-                           f"Remaining: {len(self.open_positions)-1}")
-            
-            # Remove closed position
-            self.open_positions.remove(position_to_close)
-            
-            self.save_state()
+                normalized_exit_reason = self._normalize_exit_reason(exit_reason)
+                
+                # Create trade record
+                trade_record = {
+                    'ticket': position_to_close['ticket'],
+                    'entry_time': position_to_close['entry_time'].isoformat() 
+                                 if isinstance(position_to_close['entry_time'], datetime) 
+                                 else position_to_close['entry_time'],
+                    'exit_time': exit_time.isoformat() if isinstance(exit_time, datetime) else exit_time,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'stop_loss': position_to_close['stop_loss'],
+                    'take_profit': position_to_close['take_profit'],
+                    'volume': volume,
+                    'profit': net_pl,
+                    'gross_pl': gross_pl,
+                    'commission': commission_total,
+                    'swap': swap_value,
+                    'net_pl': net_pl,
+                    'exit_reason': normalized_exit_reason,
+                    'pattern_info': position_to_close.get('pattern_info'),
+                    'is_winner': net_pl > 0
+                }
+                
+                # Debug log - verify exit_reason is text, not a price
+                self.logger.info(f"Trade record created: ticket={trade_record['ticket']}, "
+                               f"exit_reason='{normalized_exit_reason}' (type: {type(normalized_exit_reason).__name__}), "
+                               f"take_profit={trade_record['take_profit']}")
+                
+                # Update statistics
+                self.trade_history.append(trade_record)
+                self.total_trades += 1
+                self.total_profit += net_pl
+                
+                if net_pl > 0:
+                    self.winning_trades += 1
+                else:
+                    self.losing_trades += 1
+                
+                self.logger.info(f"Position closed: Ticket={trade_record['ticket']}, "
+                               f"Profit=${net_pl:.2f}, Reason={normalized_exit_reason}, "
+                               f"Remaining: {len(self.open_positions)-1}")
+                
+                # Remove closed position
+                self.open_positions.remove(position_to_close)
+                
+                self.save_state()
             
         except Exception as e:
             self.logger.error(f"Error closing position: {e}")
@@ -375,6 +383,57 @@ class StateManager:
             
         except Exception as e:
             self.logger.error(f"Error updating TP state: {e}")
+            return False
+    
+    def update_tp_exit_metadata(self, ticket: int,
+                                post_tp1_decision: Optional[str] = None,
+                                tp1_exit_reason: Optional[str] = None,
+                                post_tp2_decision: Optional[str] = None,
+                                tp2_exit_reason: Optional[str] = None,
+                                trailing_sl_level: Optional[float] = None,
+                                trailing_sl_enabled: Optional[bool] = None) -> bool:
+        """
+        Update TP1/TP2 exit decision metadata for a position.
+        
+        Args:
+            ticket: Position ticket number
+            post_tp1_decision: TP1 decision (HOLD, WAIT_NEXT_BAR, EXIT_TRADE)
+            tp1_exit_reason: Reason for TP1 decision
+            post_tp2_decision: TP2 decision (HOLD, WAIT_NEXT_BAR, EXIT_TRADE)
+            tp2_exit_reason: Reason for TP2 decision
+            trailing_sl_level: Trailing SL price
+            trailing_sl_enabled: Whether trailing SL is active
+            
+        Returns:
+            True if updated, False if position not found
+        """
+        try:
+            for position in self.open_positions:
+                if position['ticket'] == ticket:
+                    if post_tp1_decision is not None:
+                        position['post_tp1_decision'] = post_tp1_decision
+                    if tp1_exit_reason is not None:
+                        position['tp1_exit_reason'] = tp1_exit_reason
+                    if post_tp2_decision is not None:
+                        position['post_tp2_decision'] = post_tp2_decision
+                    if tp2_exit_reason is not None:
+                        position['tp2_exit_reason'] = tp2_exit_reason
+                    if trailing_sl_level is not None:
+                        position['trailing_sl_level'] = trailing_sl_level
+                    if trailing_sl_enabled is not None:
+                        position['trailing_sl_enabled'] = trailing_sl_enabled
+                    
+                    self.logger.debug(f"Ticket {ticket}: TP exit metadata updated - "
+                                    f"TP1={post_tp1_decision}, TP2={post_tp2_decision}")
+                    
+                    self.save_state()
+                    return True
+            
+            self.logger.warning(f"Position ticket {ticket} not found for metadata update")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error updating TP exit metadata: {e}")
             return False
     
     def get_position_by_ticket(self, ticket: int) -> Optional[Dict]:
@@ -470,6 +529,19 @@ class StateManager:
 
         for pos in self.open_positions:
             pos_copy = pos.copy()
+            # Ensure TP exit metadata fields are persisted
+            if 'post_tp1_decision' not in pos_copy:
+                pos_copy['post_tp1_decision'] = 'NOT_REACHED'
+            if 'tp1_exit_reason' not in pos_copy:
+                pos_copy['tp1_exit_reason'] = None
+            if 'post_tp2_decision' not in pos_copy:
+                pos_copy['post_tp2_decision'] = 'NOT_REACHED'
+            if 'tp2_exit_reason' not in pos_copy:
+                pos_copy['tp2_exit_reason'] = None
+            if 'trailing_sl_level' not in pos_copy:
+                pos_copy['trailing_sl_level'] = None
+            if 'trailing_sl_enabled' not in pos_copy:
+                pos_copy['trailing_sl_enabled'] = False
             
             # Convert datetime to ISO string
             if 'entry_time' in pos_copy and isinstance(pos_copy['entry_time'], datetime):

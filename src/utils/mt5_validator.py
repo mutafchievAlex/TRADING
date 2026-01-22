@@ -25,22 +25,6 @@ class MT5OrderValidator:
     """
     Validates MT5 order parameters against broker specifications.
     
-    Configuration constants for validation thresholds.
-    """
-    
-    # Normalization thresholds
-    NORMALIZATION_WARNING_THRESHOLD = 0.5  # Warn if volume adjustment exceeds 50% of step
-    
-    # Distance validation thresholds (as percentages)
-    MIN_DISTANCE_PCT = 0.0001  # 0.01% minimum distance for SL/TP
-    MAX_SL_WARNING_PCT = 0.20  # 20% maximum SL distance (warning only)
-    MAX_PRICE_DEVIATION_PCT = 0.10  # 10% maximum price deviation for market orders
-
-
-class MT5OrderValidator:
-    """
-    Validates MT5 order parameters against broker specifications.
-    
     Usage:
         validator = MT5OrderValidator()
         validator.validate_order_params(
@@ -52,6 +36,13 @@ class MT5OrderValidator:
             tp=2020.0
         )
     """
+    # Normalization thresholds
+    NORMALIZATION_WARNING_THRESHOLD = 0.5  # Warn if volume adjustment exceeds 50% of step
+
+    # Distance validation thresholds (as percentages)
+    MIN_DISTANCE_PCT = 0.0001  # 0.01% minimum distance for SL/TP
+    MAX_SL_WARNING_PCT = 0.20  # 20% maximum SL distance (warning only)
+    MAX_PRICE_DEVIATION_PCT = 0.10  # 10% maximum price deviation for market orders
     
     def __init__(self, mt5_module=None):
         """

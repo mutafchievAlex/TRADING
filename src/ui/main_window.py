@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont, QColor
 from datetime import datetime, timedelta
+from typing import Optional
 import logging
 import math
 import yaml
@@ -264,20 +265,80 @@ class MainWindow(QMainWindow):
         return group
     
     def _create_market_tab(self) -> QWidget:
-        """Create the market data tab."""
+        """Create the market data tab with responsive layout and indicator controls."""
         widget = QWidget()
         outer_layout = QVBoxLayout()
         
-        # Current price
+        # ===== INDICATOR VISIBILITY CONTROLS =====
+        control_group = QGroupBox("Display Filters")
+        control_layout = QHBoxLayout()
+        control_layout.setSpacing(10)
+        
+        self.chk_show_indicators = QCheckBox("Indicators")
+        self.chk_show_indicators.setChecked(True)
+        self.chk_show_indicators.stateChanged.connect(self._on_indicator_visibility_changed)
+        
+        self.chk_show_pattern = QCheckBox("Pattern")
+        self.chk_show_pattern.setChecked(True)
+        self.chk_show_pattern.stateChanged.connect(self._on_pattern_visibility_changed)
+        
+        self.chk_show_regime = QCheckBox("Regime")
+        self.chk_show_regime.setChecked(True)
+        self.chk_show_regime.stateChanged.connect(self._on_regime_visibility_changed)
+        
+        self.chk_show_entry_conds = QCheckBox("Entry Conditions")
+        self.chk_show_entry_conds.setChecked(True)
+        self.chk_show_entry_conds.stateChanged.connect(self._on_entry_conditions_visibility_changed)
+        
+        control_layout.addWidget(self.chk_show_indicators)
+        control_layout.addWidget(self.chk_show_pattern)
+        control_layout.addWidget(self.chk_show_regime)
+        control_layout.addWidget(self.chk_show_entry_conds)
+        control_layout.addStretch()
+        control_group.setLayout(control_layout)
+        outer_layout.addWidget(control_group)
+        
+        # ===== MAIN CONTENT WITH RESPONSIVE SCROLL =====
+        # Current price (always visible, important)
         price_group = QGroupBox("Current Price")
         price_layout = QVBoxLayout()
         self.lbl_price = QLabel("Price: -")
         self.lbl_price.setFont(QFont("Arial", 24, QFont.Bold))
         price_layout.addWidget(self.lbl_price)
         price_group.setLayout(price_layout)
+        outer_layout.addWidget(price_group)
         
-        # Market Regime (NEW - top summary block)
-        regime_group = QGroupBox("Market Regime")
+        # ===== SCROLLABLE CONTENT AREA =====
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #444;
+                background-color: #1e1e1e;
+            }
+            QScrollBar:vertical {
+                width: 12px;
+                background-color: #2b2b2b;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #555555;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #777777;
+            }
+        """)
+        
+        # Scrollable widget
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout()
+        scroll_layout.setContentsMargins(8, 8, 8, 8)
+        scroll_layout.setSpacing(10)
+        
+        # Market Regime (visibility controlled)
+        self.regime_group = QGroupBox("Market Regime")
         regime_layout = QVBoxLayout()
         self.lbl_regime = QLabel("Regime: RANGE")
         self.lbl_regime.setFont(QFont("Arial", 12, QFont.Bold))
@@ -288,10 +349,11 @@ class MainWindow(QMainWindow):
         regime_layout.addWidget(self.lbl_regime_confidence)
         regime_layout.addWidget(self.lbl_ema_distance)
         regime_layout.addWidget(self.lbl_price_distance)
-        regime_group.setLayout(regime_layout)
+        self.regime_group.setLayout(regime_layout)
+        scroll_layout.addWidget(self.regime_group)
         
-        # Indicators
-        indicators_group = QGroupBox("Indicators")
+        # Indicators (visibility controlled)
+        self.indicators_group = QGroupBox("Indicators")
         indicators_layout = QVBoxLayout()
         self.lbl_ema50 = QLabel("EMA 50: -")
         self.lbl_ema200 = QLabel("EMA 200: -")
@@ -299,10 +361,11 @@ class MainWindow(QMainWindow):
         indicators_layout.addWidget(self.lbl_ema50)
         indicators_layout.addWidget(self.lbl_ema200)
         indicators_layout.addWidget(self.lbl_atr)
-        indicators_group.setLayout(indicators_layout)
+        self.indicators_group.setLayout(indicators_layout)
+        scroll_layout.addWidget(self.indicators_group)
         
-        # Pattern detection
-        pattern_group = QGroupBox("Pattern Detection")
+        # Pattern detection (visibility controlled)
+        self.pattern_group = QGroupBox("Pattern Detection")
         pattern_layout = QVBoxLayout()
         self.lbl_pattern_status = QLabel("Status: No pattern")
         self.lbl_pattern_details = QTextEdit()
@@ -310,10 +373,11 @@ class MainWindow(QMainWindow):
         self.lbl_pattern_details.setMaximumHeight(150)
         pattern_layout.addWidget(self.lbl_pattern_status)
         pattern_layout.addWidget(self.lbl_pattern_details)
-        pattern_group.setLayout(pattern_layout)
+        self.pattern_group.setLayout(pattern_layout)
+        scroll_layout.addWidget(self.pattern_group)
         
-        # Entry conditions
-        entry_group = QGroupBox("Entry Conditions")
+        # Entry conditions (visibility controlled)
+        self.entry_group = QGroupBox("Entry Conditions")
         entry_layout = QVBoxLayout()
         self.lbl_cond_pattern = QLabel("Pattern Valid")
         self.lbl_cond_breakout = QLabel("Breakout Confirmed")
@@ -321,32 +385,26 @@ class MainWindow(QMainWindow):
         self.lbl_cond_momentum = QLabel("Momentum OK")
         self.lbl_cond_cooldown = QLabel("Cooldown OK")
         
-        # Initialize with red text (not met)
-        for label in [self.lbl_cond_pattern, self.lbl_cond_breakout, self.lbl_cond_trend, 
-                      self.lbl_cond_momentum, self.lbl_cond_cooldown]:
+        # Initialize with neutral gray (not evaluated yet)
+        self.entry_condition_labels = [
+            self.lbl_cond_pattern, self.lbl_cond_breakout, self.lbl_cond_trend, 
+            self.lbl_cond_momentum, self.lbl_cond_cooldown
+        ]
+        for label in self.entry_condition_labels:
             label.setProperty("base_text", label.text())
-            label.setStyleSheet("color: red; font-weight: bold;")
+            self._apply_condition_style(label, None)  # None = not evaluated
+            label.setToolTip("Condition not yet evaluated")
         
         entry_layout.addWidget(self.lbl_cond_pattern)
         entry_layout.addWidget(self.lbl_cond_breakout)
         entry_layout.addWidget(self.lbl_cond_trend)
         entry_layout.addWidget(self.lbl_cond_momentum)
         entry_layout.addWidget(self.lbl_cond_cooldown)
-        entry_group.setLayout(entry_layout)
+        self.entry_group.setLayout(entry_layout)
+        scroll_layout.addWidget(self.entry_group)
         
-        # Entry Quality Score (NEW) - Hidden until implemented
-        quality_group = QGroupBox("Entry Quality Score")
-        quality_group.setVisible(False)  # Hide until quality scoring is implemented
-        quality_layout = QVBoxLayout()
-        self.lbl_quality_score = QLabel("Overall: -")
-        self.lbl_quality_score.setFont(QFont("Arial", 14, QFont.Bold))
-        self.lbl_quality_breakdown = QLabel("Pattern: - | EMA: - | Momentum: - | Volatility: -")
-        quality_layout.addWidget(self.lbl_quality_score)
-        quality_layout.addWidget(self.lbl_quality_breakdown)
-        quality_group.setLayout(quality_layout)
-        
-        # Bar-Close Guard Status (NEW)
-        guard_group = QGroupBox("Bar-Close Guard Status")
+        # Bar-Close Guard Status
+        self.guard_group = QGroupBox("Bar-Close Guard Status")
         guard_layout = QVBoxLayout()
         self.lbl_guard_closed_bar = QLabel("Using Closed Bar")
         self.lbl_guard_tick_noise = QLabel("Tick Noise Filter: PASSED")
@@ -354,47 +412,14 @@ class MainWindow(QMainWindow):
         guard_layout.addWidget(self.lbl_guard_closed_bar)
         guard_layout.addWidget(self.lbl_guard_tick_noise)
         guard_layout.addWidget(self.lbl_guard_anti_fomo)
-        guard_group.setLayout(guard_layout)
+        self.guard_group.setLayout(guard_layout)
+        scroll_layout.addWidget(self.guard_group)
         
-        # Build two-column layout using a horizontal splitter
-        splitter = QSplitter(Qt.Horizontal)
-
-        left_widget = QWidget()
-        left_layout = QVBoxLayout()
-        # High-importance summary panels on the left
-        left_layout.addWidget(price_group)
-        left_layout.addWidget(regime_group)
-        left_layout.addWidget(indicators_group)
-        left_layout.addWidget(entry_group)
-        # quality_group is hidden - not added to layout
-        left_layout.addStretch()
-        left_widget.setLayout(left_layout)
-
-        # Wrap left column in a scroll area to avoid squashing on small screens
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setWidget(left_widget)
-
-        right_widget = QWidget()
-        right_layout = QVBoxLayout()
-        # Supporting context panels on the right
-        right_layout.addWidget(pattern_group)
-        right_layout.addWidget(guard_group)
-        right_layout.addStretch()
-        right_widget.setLayout(right_layout)
-
-        # Wrap right column in a scroll area as well
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setWidget(right_widget)
-
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(right_scroll)
-        # Prioritize left column space slightly
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-
-        outer_layout.addWidget(splitter)
+        scroll_layout.addStretch()
+        scroll_widget.setLayout(scroll_layout)
+        scroll_area.setWidget(scroll_widget)
+        
+        outer_layout.addWidget(scroll_area)
         widget.setLayout(outer_layout)
         return widget
     
@@ -872,7 +897,7 @@ class MainWindow(QMainWindow):
             self.spin_rr_short.setValue(self.config.get('strategy.risk_reward_ratio_short', 2.0))
             self.spin_cooldown.setValue(self.config.get('strategy.cooldown_hours', 24))
             self.spin_pyramiding.setValue(self.config.get('strategy.pyramiding', 1))
-            self.chk_momentum.setChecked(self.config.get('strategy.enable_momentum_filter', True))
+            self.chk_momentum.setChecked(self.config.get('strategy.enable_momentum_filter', False))
             
             self.logger.info("Settings loaded from config")
         except Exception as e:
@@ -1211,8 +1236,8 @@ class MainWindow(QMainWindow):
                     self.lbl_tp3_badge.setStyleSheet(f"font-size: 9px; padding: 2px 4px; background-color: {badge_color}; color: white; border-radius: 3px;")
                     
                     # HIGH: TP_DECISION_PANELS_EMPTY - Bind to TP engine state with defaults
-                    post_tp1_decision = position.get('post_tp1_decision', 'HOLD')  # Default to HOLD (HIGH mitigation)
-                    tp1_exit_reason = position.get('tp1_exit_reason', 'Awaiting TP1 trigger')  # Default reason (HIGH mitigation)
+                    post_tp1_decision = position.get('post_tp1_decision', 'NOT_REACHED')  # Default indicates no TP1 yet
+                    tp1_exit_reason = position.get('tp1_exit_reason', 'No metadata yet')  # Clear message
                     bars_after_tp1 = position.get('bars_held_after_tp1', 0)
                     
                     # FIX: NO_VISUAL_STATE_HIERARCHY - Update state badges with colors based on tp_state
@@ -1241,12 +1266,14 @@ class MainWindow(QMainWindow):
                         self.lbl_post_tp1_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #f57c00; color: white;")
                     elif post_tp1_decision == 'EXIT_TRADE':
                         self.lbl_post_tp1_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #d32f2f; color: white;")
+                    elif post_tp1_decision == 'NOT_REACHED':
+                        self.lbl_post_tp1_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #555; color: #aaa;")
                     else:
                         self.lbl_post_tp1_decision.setStyleSheet("font-size: 10px; padding: 3px;")
                     
                     # MEDIUM: TRAILING_SL_VISIBILITY_MISSING - Show trailing SL status
-                    post_tp2_decision = position.get('post_tp2_decision', 'HOLD')  # Default to HOLD (HIGH mitigation)
-                    tp2_exit_reason = position.get('tp2_exit_reason', 'Awaiting TP2 trigger')  # Default reason (HIGH mitigation)
+                    post_tp2_decision = position.get('post_tp2_decision', 'NOT_REACHED')  # Default indicates no TP2 yet
+                    tp2_exit_reason = position.get('tp2_exit_reason', 'No metadata yet')  # Clear message
                     bars_after_tp2 = position.get('bars_held_after_tp2', 0)
                     trailing_sl_enabled = position.get('trailing_sl_enabled', False)
                     trailing_sl = position.get('trailing_sl_level')
@@ -1274,6 +1301,8 @@ class MainWindow(QMainWindow):
                         self.lbl_post_tp2_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #f57c00; color: white;")
                     elif post_tp2_decision == 'EXIT_TRADE':
                         self.lbl_post_tp2_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #d32f2f; color: white;")
+                    elif post_tp2_decision == 'NOT_REACHED':
+                        self.lbl_post_tp2_decision.setStyleSheet("font-size: 10px; padding: 3px; background-color: #555; color: #aaa;")
                     else:
                         self.lbl_post_tp2_decision.setStyleSheet("font-size: 10px; padding: 3px;")
                     
@@ -1457,23 +1486,84 @@ class MainWindow(QMainWindow):
         self.lbl_ema_distance.setText(f"EMA Distance: {ema_distance_text}")
         self.lbl_price_distance.setText(f"Price Distance: {price_distance_text}")
     
-    def update_entry_conditions(self, conditions: dict):
-        """Update entry conditions display."""
-        self._update_condition_label(self.lbl_cond_pattern, conditions.get('pattern_valid', False))
-        self._update_condition_label(self.lbl_cond_breakout, conditions.get('breakout_confirmed', False))
-        self._update_condition_label(self.lbl_cond_trend, conditions.get('above_ema50', False))
-        self._update_condition_label(self.lbl_cond_momentum, conditions.get('has_momentum', False))
-        self._update_condition_label(self.lbl_cond_cooldown, conditions.get('cooldown_ok', False))
+    def update_entry_conditions(self, conditions: dict = None):
+        """Update entry conditions display with semantic coloring."""
+        if conditions is None:
+            conditions = {}
+        self._update_condition_label(self.lbl_cond_pattern, conditions.get('pattern_valid', None), conditions)
+        self._update_condition_label(self.lbl_cond_breakout, conditions.get('breakout_confirmed', None), conditions)
+        self._update_condition_label(self.lbl_cond_trend, conditions.get('above_ema50', None), conditions)
+        self._update_condition_label(self.lbl_cond_momentum, conditions.get('has_momentum', None), conditions)
+        self._update_condition_label(self.lbl_cond_cooldown, conditions.get('cooldown_ok', None), conditions)
     
-    def _update_condition_label(self, label: QLabel, met: bool):
-        """Update a condition label with checkmark or X."""
+    def _update_condition_label(self, label: QLabel, met: bool, conditions: dict = None):
+        """
+        Update a condition label with semantic coloring and tooltips.
+        
+        Color scheme:
+        - GREEN: Condition met
+        - GRAY: Not evaluated yet
+        - RED: Failed (only if explicitly failed, not just neutral)
+        """
         base_text = label.property("base_text") or label.text()
+        tooltip = "Condition not yet evaluated"
+        
         if met:
-            label.setText(f"PASS: {base_text}")
-            label.setStyleSheet("color: green; font-weight: bold;")
+            label.setText(f"✓ {base_text}")
+            self._apply_condition_style(label, True)
+            tooltip = "Condition met"
+        elif met is False:
+            label.setText(f"✗ {base_text}")
+            self._apply_condition_style(label, False)
+            tooltip = "Condition failed"
+            
+            # Add numeric details if available
+            if conditions:
+                if "momentum" in base_text.lower():
+                    body = conditions.get('momentum_candle_body')
+                    min_req = conditions.get('momentum_min_required')
+                    if body is not None and min_req is not None:
+                        tooltip = f"Momentum body {body:.2f} < required {min_req:.2f}"
+                elif "cooldown" in base_text.lower():
+                    remaining = conditions.get('cooldown_remaining_hours')
+                    if remaining is not None:
+                        tooltip = f"Cooldown: {remaining:.2f}h remaining"
         else:
-            label.setText(f"FAIL: {base_text}")
-            label.setStyleSheet("color: red; font-weight: bold;")
+            # None = not evaluated
+            label.setText(f"? {base_text}")
+            self._apply_condition_style(label, None)
+            tooltip = "Condition not yet evaluated"
+        
+        label.setToolTip(tooltip)
+    
+    def _apply_condition_style(self, label: QLabel, state: Optional[bool]):
+        """Apply semantic color based on condition state."""
+        if state is True:  # Met
+            label.setStyleSheet("color: #4CAF50; font-weight: bold;")  # Green
+        elif state is False:  # Failed
+            label.setStyleSheet("color: #F44336; font-weight: bold;")  # Red
+        else:  # None = not evaluated
+            label.setStyleSheet("color: #9E9E9E; font-weight: bold;")  # Gray
+    
+    def _on_indicator_visibility_changed(self):
+        """Handle indicators visibility toggle."""
+        if hasattr(self, 'indicators_group'):
+            self.indicators_group.setVisible(self.chk_show_indicators.isChecked())
+    
+    def _on_pattern_visibility_changed(self):
+        """Handle pattern visibility toggle."""
+        if hasattr(self, 'pattern_group'):
+            self.pattern_group.setVisible(self.chk_show_pattern.isChecked())
+    
+    def _on_regime_visibility_changed(self):
+        """Handle regime visibility toggle."""
+        if hasattr(self, 'regime_group'):
+            self.regime_group.setVisible(self.chk_show_regime.isChecked())
+    
+    def _on_entry_conditions_visibility_changed(self):
+        """Handle entry conditions visibility toggle."""
+        if hasattr(self, 'entry_group'):
+            self.entry_group.setVisible(self.chk_show_entry_conds.isChecked())
     
     def update_position_preview(self, decision_output: dict = None):
         """

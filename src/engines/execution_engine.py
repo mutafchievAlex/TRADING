@@ -74,12 +74,22 @@ class ExecutionEngine:
             self.logger.error("Symbol info unavailable for %s (symbol not found).", self.symbol)
             return False
 
-        if not symbol_info.visible or not symbol_info.trade_allowed:
+        # Some brokers expose trade_allowed, others require trade_mode check
+        is_visible = getattr(symbol_info, "visible", True)
+        if hasattr(symbol_info, "trade_allowed"):
+            is_tradeable = bool(symbol_info.trade_allowed)
+            trade_flag_str = f"trade_allowed={symbol_info.trade_allowed}"
+        else:
+            trade_mode = getattr(symbol_info, "trade_mode", mt5.SYMBOL_TRADE_MODE_FULL)
+            is_tradeable = trade_mode != mt5.SYMBOL_TRADE_MODE_DISABLED
+            trade_flag_str = f"trade_mode={trade_mode}"
+
+        if (not is_visible) or (not is_tradeable):
             self.logger.warning(
-                "Symbol %s not tradeable (visible=%s trade_allowed=%s). Attempting symbol_select.",
+                "Symbol %s not tradeable (visible=%s %s). Attempting symbol_select.",
                 self.symbol,
-                symbol_info.visible,
-                symbol_info.trade_allowed,
+                is_visible,
+                trade_flag_str,
             )
             if not mt5.symbol_select(self.symbol, True):
                 self.logger.error("Symbol %s not tradeable after symbol_select.", self.symbol)
@@ -396,48 +406,77 @@ class ExecutionEngine:
     
     def get_last_trades(self, count: int = 10) -> list:
         """
-        Get history of last N trades.
+        Get aggregated history of last N closed trades (entry + exit paired).
         
         Args:
             count: Number of recent trades to retrieve
             
         Returns:
-            List of trade history dicts
+            List of trade history dicts with entry/exit details
         """
         try:
             from datetime import datetime, timedelta
             
-            # Get deals from last 30 days
             date_from = datetime.now() - timedelta(days=30)
             date_to = datetime.now()
-            
             deals = mt5.history_deals_get(date_from, date_to)
-            
             if deals is None:
                 return []
-            
-            # Filter by symbol and magic number
-            strategy_deals = [
-                {
-                    'ticket': deal.ticket,
-                    'order': deal.order,
-                    'time': datetime.fromtimestamp(deal.time),
-                    'type': 'BUY' if deal.type == mt5.DEAL_TYPE_BUY else 'SELL',
-                    'entry': 'IN' if deal.entry == mt5.DEAL_ENTRY_IN else 'OUT',
-                    'volume': deal.volume,
-                    'price': deal.price,
-                    'profit': deal.profit,
-                    'swap': deal.swap,
-                    'commission': deal.commission,
-                    'comment': deal.comment
-                }
-                for deal in deals
-                if deal.symbol == self.symbol and deal.magic == self.magic_number
-            ]
-            
-            # Sort by time descending and limit
-            strategy_deals.sort(key=lambda x: x['time'], reverse=True)
-            return strategy_deals[:count]
+
+            # Collect deals by position (pair IN and OUT legs)
+            positions = {}
+            for deal in deals:
+                if deal.symbol != self.symbol or deal.magic != self.magic_number:
+                    continue
+
+                position_id = getattr(deal, "position", None) or getattr(deal, "order", None) or deal.ticket
+                record = positions.setdefault(position_id, {"ticket": position_id})
+
+                deal_time = datetime.fromtimestamp(deal.time)
+                if deal.entry == mt5.DEAL_ENTRY_IN and "entry_time" not in record:
+                    record.update({
+                        "entry_time": deal_time,
+                        "entry_price": deal.price,
+                        "volume_entry": deal.volume,
+                        "comment": deal.comment,
+                    })
+                elif deal.entry == mt5.DEAL_ENTRY_OUT:
+                    record.update({
+                        "exit_time": deal_time,
+                        "exit_price": deal.price,
+                        "profit": record.get("profit", 0) + deal.profit,
+                        "swap": record.get("swap", 0) + deal.swap,
+                        "commission": record.get("commission", 0) + deal.commission,
+                        "volume_closed": record.get("volume_closed", 0) + deal.volume,
+                        "exit_reason": deal.comment or record.get("exit_reason") or "Closed",
+                    })
+
+            # Build trade history rows using paired entry/exit data
+            history = []
+            for record in positions.values():
+                exit_time = record.get("exit_time")
+                if not exit_time:
+                    continue  # skip still-open positions
+
+                entry_time = record.get("entry_time", exit_time)
+                entry_price = record.get("entry_price", record.get("exit_price", 0))
+
+                history.append({
+                    "ticket": record.get("ticket"),
+                    "entry_time": entry_time,
+                    "exit_time": exit_time,
+                    "entry_price": entry_price,
+                    "exit_price": record.get("exit_price", entry_price),
+                    "profit": record.get("profit", 0),
+                    "swap": record.get("swap", 0),
+                    "commission": record.get("commission", 0),
+                    "exit_reason": record.get("exit_reason", "Closed"),
+                    "take_profit": record.get("take_profit", record.get("exit_price", 0)),
+                    "volume": record.get("volume_entry") or record.get("volume_closed", 0),
+                })
+
+            history.sort(key=lambda x: x.get("exit_time") or datetime.min, reverse=True)
+            return history[:count]
             
         except Exception as e:
             self.logger.error(f"Error getting trade history: {e}")

@@ -137,8 +137,8 @@ class StrategyConfig:
     atr_multiplier_stop: float = 2.0
     risk_reward_ratio_long: float = 2.0
     risk_reward_ratio_short: float = 2.0
-    momentum_atr_threshold: float = 0.5
-    enable_momentum_filter: bool = True
+    momentum_atr_threshold: float = 0.3
+    enable_momentum_filter: bool = False
     cooldown_hours: int = 24
     pyramiding: int = 1
     quality_score_threshold: Optional[float] = None

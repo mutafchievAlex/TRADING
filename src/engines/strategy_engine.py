@@ -108,8 +108,8 @@ class StrategyEngine:
                  atr_multiplier_stop: float = 2.0,
                  risk_reward_ratio_long: float = 2.0,
                  risk_reward_ratio_short: float = 2.0,
-                 momentum_atr_threshold: float = 0.5,
-                 enable_momentum_filter: bool = True,
+                 momentum_atr_threshold: float = 0.3,
+                 enable_momentum_filter: bool = False,
                  cooldown_hours: int = 24):
         """
         Initialize Strategy Engine.
@@ -118,8 +118,8 @@ class StrategyEngine:
             atr_multiplier_stop: ATR multiplier for stop loss (default: 2.0)
             risk_reward_ratio_long: Risk/reward ratio for LONG trades (default: 2.0)
             risk_reward_ratio_short: Risk/reward ratio for SHORT trades (default: 2.0)
-            momentum_atr_threshold: Minimum momentum as ATR multiple (default: 0.5)
-            enable_momentum_filter: Enable/disable momentum filter (default: True)
+            momentum_atr_threshold: Minimum momentum as ATR multiple (default: 0.3)
+            enable_momentum_filter: Enable/disable momentum filter (default: False)
             cooldown_hours: Hours between trades (default: 24)
         """
         self.atr_multiplier_stop = atr_multiplier_stop
@@ -149,7 +149,7 @@ class StrategyEngine:
         # TP2 exit decision engine for post-TP2 management
         self.tp2_exit_decision = TP2ExitDecisionEngine(logger=self.logger)
     
-    def check_momentum_condition(self, current_bar: pd.Series) -> bool:
+    def check_momentum_condition(self, current_bar: pd.Series) -> Tuple[bool, Optional[float], Optional[float]]:
         """
         Check if breakout candle has sufficient momentum.
         
@@ -160,22 +160,28 @@ class StrategyEngine:
             current_bar: Current bar data with close, open, atr14
             
         Returns:
-            True if momentum sufficient, False otherwise
+            Tuple of (has_momentum, candle_body_size, min_required)
         """
         try:
-            candle_size = abs(current_bar['close'] - current_bar['open'])
-            min_momentum = current_bar['atr14'] * self.momentum_atr_threshold
-            
+            candle_size = float(abs(current_bar['close'] - current_bar['open']))
+            atr_val = current_bar['atr14']
+            if atr_val is None or pd.isna(atr_val):
+                self.logger.warning("Momentum check skipped: atr14 missing")
+                return False, candle_size, None
+
+            min_momentum = float(atr_val) * self.momentum_atr_threshold
             has_momentum = candle_size >= min_momentum
             
             if not has_momentum:
-                self.logger.debug(f"Momentum check failed: {candle_size:.2f} < {min_momentum:.2f}")
+                self.logger.debug(
+                    f"Momentum check failed: body={candle_size:.2f} < min={min_momentum:.2f}"
+                )
             
-            return has_momentum
+            return has_momentum, candle_size, min_momentum
             
         except Exception as e:
             self.logger.error(f"Error checking momentum: {e}")
-            return False
+            return False, None, None
     
     def check_trend_condition(self, current_bar: pd.Series) -> bool:
         """
@@ -200,28 +206,79 @@ class StrategyEngine:
             self.logger.error(f"Error checking trend: {e}")
             return False
     
-    def check_cooldown(self, current_time: datetime) -> bool:
+    @staticmethod
+    def _normalize_datetime(value: Optional[object]) -> Optional[datetime]:
+        """Normalize various datetime-like inputs to a naive datetime."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    def check_cooldown(self, current_time: datetime) -> Tuple[bool, Optional[float]]:
         """
         Check if cooldown period has passed since last trade.
         
         Args:
-            current_time: Current datetime
+            current_time: Current datetime or timestamp
             
         Returns:
-            True if cooldown respected, False if still in cooldown
+            Tuple of (is_cooldown_respected, remaining_hours_if_blocked)
         """
-        if self.last_trade_time is None:
-            return True
-        
-        time_since_last_trade = current_time - self.last_trade_time
+        last_trade_dt = self._normalize_datetime(self.last_trade_time)
+        current_dt = self._normalize_datetime(current_time)
+
+        # Debug: Log raw and normalized values
+        self.logger.debug(
+            f"Cooldown check: last_trade_time={self.last_trade_time} (type={type(self.last_trade_time).__name__}), "
+            f"last_trade_dt={last_trade_dt}, current_time={current_time} (type={type(current_time).__name__}), "
+            f"current_dt={current_dt}"
+        )
+
+        if last_trade_dt is None:
+            self.logger.debug("Cooldown check: No last trade, allowing entry")
+            return True, None
+        if current_dt is None:
+            self.logger.warning(
+                f"Cooldown check: unable to parse current time (raw={current_time}, type={type(current_time).__name__}); defaulting to blocked"
+            )
+            return False, None
+
+        time_since_last_trade = current_dt - last_trade_dt
         cooldown_delta = timedelta(hours=self.cooldown_hours)
-        
+
+        # Debug: Log time deltas
+        hours_since_last_trade = time_since_last_trade.total_seconds() / 3600.0
+        self.logger.debug(
+            f"Cooldown check: hours_since_last_trade={hours_since_last_trade:.2f}h, "
+            f"cooldown_hours={self.cooldown_hours}h"
+        )
+
+        # Guard against clock drift creating negative deltas
+        if time_since_last_trade.total_seconds() < 0:
+            self.logger.warning(
+                "Cooldown check: current time before last trade (current=%s, last=%s) - clock drift detected",
+                current_dt,
+                last_trade_dt,
+            )
+            # Calculate as if cooldown is still active (use absolute value)
+            remaining_hours = abs(hours_since_last_trade) + self.cooldown_hours
+            return False, remaining_hours
+
         if time_since_last_trade < cooldown_delta:
-            remaining = cooldown_delta - time_since_last_trade
-            self.logger.debug(f"Cooldown active: {remaining} remaining")
-            return False
+            remaining_hours = (cooldown_delta - time_since_last_trade).total_seconds() / 3600.0
+            self.logger.info(f"Cooldown ACTIVE: {remaining_hours:.2f}h remaining (last trade: {last_trade_dt})")
+            return False, remaining_hours
         
-        return True
+        self.logger.debug(f"Cooldown PASSED: {hours_since_last_trade:.2f}h since last trade")
+        return True, 0.0
     
     def calculate_stop_loss(self, entry_price: float, atr: float, 
                            pattern: Optional[dict] = None) -> float:
@@ -343,38 +400,57 @@ class StrategyEngine:
                 return False, entry_details
             
             current_bar = df.iloc[current_bar_index]
+            self.logger.debug(f"evaluate_entry: Bar {current_bar['time']}, Close={current_bar['close']:.2f}")
             
             # 1. Check pattern validity
             if pattern is None or not pattern.get('pattern_valid'):
                 entry_details['reason'] = "No valid Double Bottom pattern"
                 entry_details['failure_code'] = "INVALID_PATTERN_STRUCTURE"
+                self.logger.debug(f"Pattern check FAILED: pattern={pattern}")
                 return False, entry_details
             entry_details['pattern_valid'] = True
+            self.logger.debug(f"Pattern check PASSED: {pattern}")
             
             # 2. Check breakout above neckline
             neckline = pattern['neckline']['price']
             if current_bar['close'] <= neckline:
                 entry_details['reason'] = f"No breakout: Close {current_bar['close']:.2f} <= Neckline {neckline:.2f}"
                 entry_details['failure_code'] = "NO_NECKLINE_BREAK"
+                self.logger.debug(entry_details['reason'])
                 return False, entry_details
             entry_details['breakout_confirmed'] = True
+            self.logger.debug(f"Breakout check PASSED: Close {current_bar['close']:.2f} > Neckline {neckline:.2f}")
             
             # 3. Check trend (close > EMA50)
             if not self.check_trend_condition(current_bar):
                 entry_details['reason'] = "Trend check failed: Close not above EMA50"
                 entry_details['failure_code'] = "CONTEXT_NOT_ALIGNED"
+                self.logger.debug(f"Trend check FAILED: Close={current_bar['close']:.2f}, EMA50={current_bar['ema50']:.2f}")
                 return False, entry_details
             entry_details['above_ema50'] = True
+            self.logger.debug(f"Trend check PASSED: Close={current_bar['close']:.2f} > EMA50={current_bar['ema50']:.2f}")
             
             # 4. Check momentum (if enabled)
             if self.enable_momentum_filter:
-                if not self.check_momentum_condition(current_bar):
-                    entry_details['reason'] = "Momentum check failed: Insufficient candle size"
+                has_momentum, candle_body, min_required = self.check_momentum_condition(current_bar)
+                entry_details['momentum_candle_body'] = candle_body
+                entry_details['momentum_min_required'] = min_required
+                if not has_momentum:
+                    size_txt = f"{candle_body:.2f}" if candle_body is not None else "n/a"
+                    min_txt = f"{min_required:.2f}" if min_required is not None else "n/a"
+                    entry_details['reason'] = (
+                        f"Momentum check failed: body {size_txt} < min {min_txt}"
+                    )
                     entry_details['failure_code'] = "CONTEXT_NOT_ALIGNED"
+                    self.logger.debug(entry_details['reason'])
                     return False, entry_details
                 entry_details['has_momentum'] = True
+                self.logger.debug("Momentum check PASSED")
             else:
                 entry_details['has_momentum'] = True  # Skip momentum check
+                entry_details['momentum_candle_body'] = None
+                entry_details['momentum_min_required'] = None
+                self.logger.debug("Momentum filter DISABLED")
             
             # 5. Anti-FOMO: Check cooldown since last signal (OPTIONAL, non-blocking)
             can_enter_fomo, fomo_reason = self.bar_close_guard.check_anti_fomo_cooldown(current_bar_index)
@@ -384,11 +460,20 @@ class StrategyEngine:
             # Always proceed (anti-FOMO is only advisory)
             
             # 6. Check cooldown period between trades
-            if not self.check_cooldown(current_bar['time']):
-                entry_details['reason'] = "Cooldown period active"
+            cooldown_ok, cooldown_remaining = self.check_cooldown(current_bar['time'])
+            entry_details['cooldown_ok'] = cooldown_ok
+            entry_details['cooldown_remaining_hours'] = cooldown_remaining
+            if not cooldown_ok:
+                remaining_text = (
+                    f"{cooldown_remaining:.2f}h remaining" if cooldown_remaining is not None else "unknown"
+                )
+                entry_details['reason'] = f"Cooldown period active ({remaining_text})"
                 entry_details['failure_code'] = "COOLDOWN_ACTIVE"
+                self.logger.debug(
+                    f"Cooldown check FAILED: Last trade time={self.last_trade_time}, remaining={remaining_text}"
+                )
                 return False, entry_details
-            entry_details['cooldown_ok'] = True
+            self.logger.debug("Cooldown check PASSED")
             
             # All conditions met - prepare entry
             entry_price = current_bar['close']  # Enter at close of breakout bar

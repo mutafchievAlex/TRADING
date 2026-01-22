@@ -155,7 +155,7 @@ class DecisionEngine:
         self.equality_tolerance = config.get('strategy', {}).get('equality_tolerance', 2.0)
         self.min_bars_between = config.get('strategy', {}).get('min_bars_between', 5)
         self.atr_multiplier_stop = config.get('strategy', {}).get('atr_multiplier_stop', 2.0)
-        self.momentum_atr_threshold = config.get('strategy', {}).get('momentum_atr_threshold', 0.5)
+        self.momentum_atr_threshold = config.get('strategy', {}).get('momentum_atr_threshold', 0.3)
         self.enable_momentum_filter = config.get('strategy', {}).get('enable_momentum_filter', False)
         self.cooldown_hours = config.get('strategy', {}).get('cooldown_hours', 5)
         self.pyramiding = config.get('strategy', {}).get('pyramiding', 3)
