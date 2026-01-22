@@ -1,0 +1,60 @@
+# Development Dockerfile with PySide6 UI support and live code reloading
+
+FROM python:3.10-slim
+
+# Install system dependencies including GUI support
+RUN apt-get update && apt-get install -y \
+    wine wine32 wine64 \
+    winetricks \
+    xvfb \
+    x11-utils \
+    x11-apps \
+    curl \
+    ca-certificates \
+    fonts-liberation \
+    libxrender1 \
+    libxext6 \
+    libx11-6 \
+    mesa-utils \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    git \
+    vim \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set up X11
+ENV WINEPREFIX=/root/.wine \
+    WINEARCH=win64 \
+    DISPLAY=:99 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    QT_QPA_PLATFORM=xcb
+
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies with dev tools
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+    ipython \
+    pytest \
+    pytest-cov \
+    debugpy
+
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
+COPY data/ ./data/
+COPY scripts/ ./scripts/
+
+# Create data directories
+RUN mkdir -p /app/data/backups /app/data/historical /app/logs /app/reports
+
+# Start Xvfb in background and run application
+CMD ["bash", "-c", "Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 & python -u src/main.py"]

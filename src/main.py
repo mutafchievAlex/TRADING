@@ -538,10 +538,16 @@ class TradingController(QObject):
         self.qc_failure_count = 0
         self.qc_next_retry_at = 0.0
         
-        # Timer for main loop
+        # Timer for main loop (trading decisions)
         self.timer = QTimer()
         self.timer.timeout.connect(self.main_loop)
         self.refresh_interval = self.config.get('ui.refresh_interval_seconds', 10) * 1000
+        
+        # Continuous update timer (independent of trading state)
+        # This ensures UI updates even when trading is stopped or window is minimized
+        self.continuous_update_timer = QTimer()
+        self.continuous_update_timer.timeout.connect(self._continuous_market_update)
+        self.continuous_update_interval = self.config.get('ui.continuous_update_interval_seconds', 5) * 1000
         
         # Connection Manager with heartbeat
         self.connection_manager = MT5ConnectionManager(
@@ -747,6 +753,11 @@ class TradingController(QObject):
                 # Perform recovery if there are open positions or after restart
                 self._perform_recovery()
                 
+                # Start continuous market data updates (independent of trading state)
+                # This ensures UI stays updated even when trading is stopped or window minimized
+                self.continuous_update_timer.start(self.continuous_update_interval)
+                self.logger.info(f"Continuous market update timer started ({self.continuous_update_interval}ms)")
+                
                 return True
             else:
                 self.logger.error("Failed to connect to MT5")
@@ -759,6 +770,10 @@ class TradingController(QObject):
     def disconnect_mt5(self):
         """Disconnect from MetaTrader 5."""
         try:
+            # Stop continuous updates
+            self.continuous_update_timer.stop()
+            self.logger.info("Continuous market update timer stopped")
+            
             self.market_data.disconnect()
             self.is_connected = False
             self.logger.info("Disconnected from MT5")
@@ -1344,6 +1359,30 @@ class TradingController(QObject):
             self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
                 'message': f"QC failure: {reason_text}. Backoff {backoff_seconds:.1f}s"
             })
+    
+    @Slot()
+    def _continuous_market_update(self):
+        """
+        Continuous market data update independent of trading state.
+        
+        This runs on a separate timer and updates UI with current market data
+        even when trading is stopped or minimized. Ensures:
+        - Live price updates
+        - Indicator calculations
+        - Chart refresh
+        - No freeze when window is minimized or trading stopped
+        """
+        try:
+            if not self.is_connected:
+                return
+            
+            # Use existing refresh method to update UI with latest data
+            self._refresh_market_data_ui()
+            
+            self.logger.debug("Continuous market update completed")
+        
+        except Exception as e:
+            self.logger.debug(f"Error in continuous update: {e}")
     
     def _check_entry(self, df, pattern, current_bar):
         """Check for entry signal and execute trade if conditions met."""

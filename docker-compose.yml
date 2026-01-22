@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    container_name: trading_system_xauusd
+    
+    # Auto-restart policy - ensures trading continues after host restart
+    restart: always
+    
+    # Resource limits to prevent host exhaustion
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    
+    # Environment configuration
+    environment:
+      - TRADING_CONFIG=/app/config/config.yaml
+      - TRADING_MODE=DEVELOPMENT  # Set to PRODUCTION for live trading
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - TZ=UTC  # Use UTC for consistent timestamps
+    
+    # Volume mounts for persistence
+    volumes:
+      # Config - mount read-only to prevent accidental changes
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+      
+      # State persistence
+      - trading_data:/app/data
+      
+      # Logs for monitoring
+      - ./logs:/app/logs
+      
+      # Reports
+      - ./reports:/app/reports
+    
+    # Port forwarding for potential remote monitoring
+    # Uncomment if adding a web dashboard in future
+    # ports:
+    #   - "8080:8080"
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
+        labels: "trading.service=xauusd"
+    
+    # Labels for monitoring/identification
+    labels:
+      app: "trading_system"
+      symbol: "XAUUSD"
+      strategy: "double_bottom"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "from src.main import TradingController; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  trading_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data
+
+networks:
+  default:
+    name: trading_network
+    driver: bridge

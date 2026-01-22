@@ -1,0 +1,61 @@
+version: '3.8'
+
+# Development compose with UI support via X11
+services:
+  trading-bot-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    
+    container_name: trading_system_dev
+    
+    # Restart on failure
+    restart: unless-stopped
+    
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/tmp/.docker.xauth
+      - TRADING_CONFIG=/app/config/config.yaml
+      - TRADING_MODE=DEVELOPMENT
+      - PYTHONUNBUFFERED=1
+    
+    volumes:
+      # Source code for live editing
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+      
+      # X11 socket for UI rendering
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ~/.Xauthority:/tmp/.docker.xauth:ro
+    
+    # Run with UI
+    command: python src/main.py
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Optional: MT5 service container (if MT5 can run in container)
+  # mt5-service:
+  #   image: trading-mt5:latest
+  #   container_name: mt5_terminal
+  #   restart: always
+  #   environment:
+  #     - MT5_LOGIN=${MT5_LOGIN}
+  #     - MT5_PASSWORD=${MT5_PASSWORD}
+  #     - MT5_SERVER=${MT5_SERVER}
+  #   volumes:
+  #     - mt5_data:/root/.wine/drive_c/users/root/AppData/Roaming/MetaQuotes/Terminal
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import MetaTrader5; MetaTrader5.initialize()"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
+networks:
+  default:
+    name: trading_dev_network
