@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from typing import Optional, Dict, List
 from pathlib import Path
-from utils.atomic_state_writer import AtomicStateWriter
+from utils.atomic_state_writer import AtomicStateWriter, SafeJSONEncoder
 from storage.state_database import StateDatabase
 
 
@@ -456,21 +456,43 @@ class StateManager:
         return self.trade_history[-count:]
 
     def _build_state_data(self) -> Dict:
+        """Build state dict for serialization, converting non-serializable types."""
         state_data = {
             'open_positions': [],
             'trade_history': self.trade_history,
             'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
-            'total_trades': self.total_trades,
-            'winning_trades': self.winning_trades,
-            'losing_trades': self.losing_trades,
-            'total_profit': self.total_profit,
+            'total_trades': int(self.total_trades),
+            'winning_trades': int(self.winning_trades),
+            'losing_trades': int(self.losing_trades),
+            'total_profit': float(self.total_profit),
             'last_regime_state': self.last_regime_state,
         }
 
         for pos in self.open_positions:
             pos_copy = pos.copy()
+            
+            # Convert datetime to ISO string
             if 'entry_time' in pos_copy and isinstance(pos_copy['entry_time'], datetime):
                 pos_copy['entry_time'] = pos_copy['entry_time'].isoformat()
+            
+            # Convert timestamp fields to ISO string
+            for ts_field in ['tp1_reached_timestamp', 'tp2_reached_timestamp']:
+                if ts_field in pos_copy and isinstance(pos_copy[ts_field], datetime):
+                    pos_copy[ts_field] = pos_copy[ts_field].isoformat()
+            
+            # Ensure bool fields are native Python bool (not numpy.bool_)
+            for bool_field in ['tp1_reached', 'tp2_reached']:
+                if bool_field in pos_copy and pos_copy[bool_field] is not None:
+                    pos_copy[bool_field] = bool(pos_copy[bool_field])
+            
+            # Ensure numeric fields are native Python types
+            for num_field in ['volume', 'atr', 'tp_value', 'risk_cash', 'tp1_cash', 'tp2_cash', 'tp3_cash',
+                             'current_stop_loss', 'bars_held_after_tp1', 'max_extension_after_tp1',
+                             'bars_held_after_tp2', 'max_extension_after_tp2', 'price_current', 'profit', 'swap']:
+                if num_field in pos_copy and pos_copy[num_field] is not None:
+                    if isinstance(pos_copy[num_field], (int, float)):
+                        pos_copy[num_field] = float(pos_copy[num_field]) if '.' in str(pos_copy[num_field]) else int(pos_copy[num_field])
+            
             state_data['open_positions'].append(pos_copy)
 
         return state_data
@@ -507,9 +529,9 @@ class StateManager:
             # Ensure directory exists
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Write to file
+            # Write to file with safe encoder for non-serializable types
             with open(self.state_file, 'w') as f:
-                json.dump(state_data, f, indent=2)
+                json.dump(state_data, f, indent=2, cls=SafeJSONEncoder)
             
             self.logger.debug(f"State saved (direct write) to {self.state_file}")
         

@@ -38,10 +38,13 @@ class RecoveryEngine:
         Args:
             recovery_bars: Number of past bars to load for recovery (default: 50)
         """
-        self.recovery_bars = recovery_bars
+        # Ensure enough history to rebuild EMA200 (needs 200 bars + buffer)
+        self.recovery_bars = max(recovery_bars, 250)
         self.logger = logging.getLogger(__name__)
         
-        self.logger.info(f"RecoveryEngine initialized with {recovery_bars} bars for reconstruction")
+        self.logger.info(
+            f"RecoveryEngine initialized with {self.recovery_bars} bars for reconstruction"
+        )
     
     def perform_recovery(self, 
                         market_data_service,
@@ -205,8 +208,8 @@ class RecoveryEngine:
             # For H1 timeframe, go back recovery_bars hours
             start_time = end_time - timedelta(hours=self.recovery_bars)
             
-            # Fetch bars
-            df = market_data_service.get_bars(count=self.recovery_bars + 5)
+            # Fetch bars with buffer to satisfy EMA200 even when some bars are missing
+            df = market_data_service.get_bars(count=self.recovery_bars + 60)
             
             if df is None or len(df) == 0:
                 self.logger.error("Failed to fetch historical data")

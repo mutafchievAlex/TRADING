@@ -1121,17 +1121,23 @@ class MainWindow(QMainWindow):
                 if row < len(all_positions):
                     position = all_positions[row]
                     
-                    # Display TP levels with both price and cash targets
-                    tp1_cash = position.get('tp1_cash', 0)
-                    tp2_cash = position.get('tp2_cash', 0)
-                    tp3_cash = position.get('tp3_cash', 0)
+                    # Display TP levels with both price and cash targets (guard None formatting)
+                    tp1_cash_val = position.get('tp1_cash')
+                    tp2_cash_val = position.get('tp2_cash')
+                    tp3_cash_val = position.get('tp3_cash')
+                    tp1_cash = 0.0 if tp1_cash_val is None else tp1_cash_val
+                    tp2_cash = 0.0 if tp2_cash_val is None else tp2_cash_val
+                    tp3_cash = 0.0 if tp3_cash_val is None else tp3_cash_val
                     tp1_price = position.get('tp1_price')
                     tp2_price = position.get('tp2_price')
                     tp3_price = position.get('tp3_price')
-                    
-                    tp1_text = f"{tp1_price:.2f}" if tp1_price is not None else "-"
-                    tp2_text = f"{tp2_price:.2f}" if tp2_price is not None else "-"
-                    tp3_text = f"{tp3_price:.2f}" if tp3_price is not None else "-"
+
+                    def fmt_price(val):
+                        return "-" if val is None else f"{val:.2f}"
+
+                    tp1_text = fmt_price(tp1_price)
+                    tp2_text = fmt_price(tp2_price)
+                    tp3_text = fmt_price(tp3_price)
 
                     self.lbl_tp1_level.setText(f"TP1: {tp1_text} | Cash: {tp1_cash:.2f} USD")
                     self.lbl_tp2_level.setText(f"TP2: {tp2_text} | Cash: {tp2_cash:.2f} USD")
@@ -1276,10 +1282,10 @@ class MainWindow(QMainWindow):
                     
                     # TP1 next exit condition
                     if tp_state == 'IN_TRADE':
-                        tp1_next_exit = f"Exit on TP1 reach: {tp1_price:.2f} (ATR retrace > 0.25*ATR)"
+                        tp1_next_exit = f"Exit on TP1 reach: {tp1_text} (ATR retrace > 0.25*ATR)" if tp1_price is not None else "TP1 not set"
                         self.lbl_tp1_next_exit.setStyleSheet("font-size: 10px; padding: 3px; background-color: #333; color: #1b5e20;")
                     elif tp_state == 'TP1_REACHED':
-                        tp1_next_exit = f"TP1 REACHED @ {tp1_price:.2f} - Managing to TP2"
+                        tp1_next_exit = f"TP1 REACHED @ {tp1_text} - Managing to TP2" if tp1_price is not None else "TP1 reached"
                         self.lbl_tp1_next_exit.setStyleSheet("font-size: 10px; padding: 3px; background-color: #1b5e20; color: white;")
                     elif tp_state == 'TP2_REACHED':
                         tp1_next_exit = f"TP1 PASSED - Position managed by TP2 logic"
@@ -1294,10 +1300,10 @@ class MainWindow(QMainWindow):
                         tp2_next_exit = "Awaiting TP1 first"
                         self.lbl_tp2_next_exit.setStyleSheet("font-size: 10px; padding: 3px; background-color: #333; color: #aaa;")
                     elif tp_state == 'TP1_REACHED':
-                        tp2_next_exit = f"Exit on TP2 reach: {tp2_price:.2f} (ATR retrace > 0.2*ATR)"
+                        tp2_next_exit = f"Exit on TP2 reach: {tp2_text} (ATR retrace > 0.2*ATR)" if tp2_price is not None else "TP2 not set"
                         self.lbl_tp2_next_exit.setStyleSheet("font-size: 10px; padding: 3px; background-color: #333; color: #f57c00;")
                     elif tp_state == 'TP2_REACHED':
-                        tp2_next_exit = f"TP2 REACHED @ {tp2_price:.2f} - Managing to TP3"
+                        tp2_next_exit = f"TP2 REACHED @ {tp2_text} - Managing to TP3" if tp2_price is not None else "TP2 reached"
                         self.lbl_tp2_next_exit.setStyleSheet("font-size: 10px; padding: 3px; background-color: #f57c00; color: white;")
                     else:
                         tp2_next_exit = "Position closed"

@@ -27,11 +27,34 @@ import json
 import logging
 import threading
 import hashlib
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 from queue import Queue, Empty, Full
 from threading import Lock, Thread, Event
+
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles bool, numpy types, and datetime objects."""
+    def default(self, obj: Any) -> Any:
+        # Handle numpy bool types
+        if isinstance(obj, (np.bool_, np.bool8)):
+            return bool(obj)
+        # Handle numpy integer types
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        # Handle numpy float types
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        # Handle datetime
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        # Handle regular bool (shouldn't happen but safety)
+        elif isinstance(obj, bool):
+            return obj
+        # Fall back to default encoder
+        return super().default(obj)
 
 
 class AtomicStateWriter:
@@ -181,14 +204,14 @@ class AtomicStateWriter:
                 state_data['saved_at'] = datetime.now().isoformat()
                 
                 # Calculate checksum for integrity verification
-                json_str = json.dumps(state_data, sort_keys=True)
+                json_str = json.dumps(state_data, sort_keys=True, cls=SafeJSONEncoder)
                 checksum = hashlib.md5(json_str.encode()).hexdigest()
                 state_data['_checksum'] = checksum
                 
                 # Write to temporary file
                 tmp_file = self.state_file.with_suffix('.tmp')
                 with open(tmp_file, 'w') as f:
-                    json.dump(state_data, f, indent=2)
+                    json.dump(state_data, f, indent=2, cls=SafeJSONEncoder)
                 
                 # Verify temp file was written
                 if not tmp_file.exists():

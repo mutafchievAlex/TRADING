@@ -291,8 +291,14 @@ class MarketDataService:
             gaps = deltas[deltas > expected_delta]
             if not gaps.empty:
                 max_gap = gaps.max()
-                return self._record_qc_failure(
-                    f"QC failed: detected {len(gaps)} time gaps (max gap {max_gap})"
+                weekend_tolerance = pd.Timedelta(days=3)
+                if max_gap > weekend_tolerance:
+                    return self._record_qc_failure(
+                        f"QC failed: detected {len(gaps)} time gaps (max gap {max_gap})"
+                    )
+                # Allow weekend/holiday gaps but surface a warning for visibility
+                self.logger.warning(
+                    f"QC warning: detected {len(gaps)} time gaps (max gap {max_gap}) within tolerance {weekend_tolerance}"
                 )
 
         self.last_qc_failure_reason = None

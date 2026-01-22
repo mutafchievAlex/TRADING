@@ -893,9 +893,9 @@ class TradingController(QObject):
                     slowest[0]['avg_ms']
                 )
             
-            # Update UI with health status
+            # Update UI with health status (reuse log channel to avoid missing event type)
             if self.window:
-                self.ui_queue.post_event(UIEventType.UPDATE_STATUS, {
+                self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
                     'message': summary
                 })
             

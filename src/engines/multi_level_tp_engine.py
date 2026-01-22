@@ -89,15 +89,26 @@ class MultiLevelTPEngine:
             tp1 = entry_price + direction * risk_per_unit * self.DEFAULT_TP1_RR
             tp2 = entry_price + direction * risk_per_unit * self.DEFAULT_TP2_RR
             
-            # TP3 comes from settings; if it ends up closer than TP1/TP2 we honor it with priority
+            # TP3 comes from settings; enforce monotonicity even when config is inside TP1/TP2 range
             rr = self.default_rr_long if direction == 1 else self.default_rr_short
             tp3_config = entry_price + direction * risk_per_unit * rr
 
-            # Enforce priority when TP3 (from settings) is inside the TP1/TP2 range
+            # Ensure TP3 stays beyond TP2 to keep ordering strict; nudge with small epsilon when needed
+            epsilon = max(risk_per_unit * 0.01, 1e-6)
             if direction == 1:
-                tp3 = min(tp3_config, tp1, tp2)
+                tp3 = max(tp3_config, tp2 + epsilon)
+                if tp3 != tp3_config:
+                    self.logger.info(
+                        "TP3 adjusted to preserve LONG monotonicity: "
+                        f"config={tp3_config:.2f}, effective={tp3:.2f}, epsilon={epsilon:.6f}"
+                    )
             else:
-                tp3 = max(tp3_config, tp1, tp2)
+                tp3 = min(tp3_config, tp2 - epsilon)
+                if tp3 != tp3_config:
+                    self.logger.info(
+                        "TP3 adjusted to preserve SHORT monotonicity: "
+                        f"config={tp3_config:.2f}, effective={tp3:.2f}, epsilon={epsilon:.6f}"
+                    )
             
             # ASSERTION 2: Monotonic TP ordering
             if direction == 1:  # LONG: TP1 < TP2 < TP3
@@ -117,12 +128,6 @@ class MultiLevelTPEngine:
                     )
                     return {}
 
-            if tp3 != tp3_config:
-                self.logger.info(
-                    "TP3 adjusted to priority target because settings TP3 was inside TP1/TP2 range: "
-                    f"config={tp3_config:.2f}, effective={tp3:.2f}"
-                )
-            
             self.logger.debug(
                 f"TP Levels calculated (direction={direction}):\n"
                 f"  Entry: {entry_price:.2f}\n"

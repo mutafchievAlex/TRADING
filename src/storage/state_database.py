@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from utils.atomic_state_writer import SafeJSONEncoder
 
 
 @dataclass(frozen=True)
@@ -122,12 +123,12 @@ class StateDatabase:
             self._insert_trades(state_data.get("trade_history", []), now)
             self.connection.execute(
                 "INSERT INTO state_snapshots (created_at, data) VALUES (?, ?)",
-                (now, json.dumps(state_data)),
+                (now, json.dumps(state_data, cls=SafeJSONEncoder)),
             )
 
     def _insert_positions(self, positions: Iterable[Dict], now: str) -> None:
         payload = [
-            (position.get("ticket"), json.dumps(position), now)
+            (position.get("ticket"), json.dumps(position, cls=SafeJSONEncoder), now)
             for position in positions
         ]
         if not payload:
@@ -139,7 +140,7 @@ class StateDatabase:
 
     def _insert_trades(self, trades: Iterable[Dict], now: str) -> None:
         payload = [
-            (trade.get("ticket"), json.dumps(trade), now) for trade in trades
+            (trade.get("ticket"), json.dumps(trade, cls=SafeJSONEncoder), now) for trade in trades
         ]
         if not payload:
             return
