@@ -55,6 +55,14 @@ config/config.yaml
 htmlcov/
 .pytest_cache/
 
+# Temporary test files in root (should be in tests/)
+/test_*.py
+/check_*.py
+/quick_test_*.py
+/*_test.py
+/test_output.txt
+/*_fixed.py
+
 # Jupyter Notebooks
 .ipynb_checkpoints
 

@@ -30,7 +30,7 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from threading import Lock, Thread, Event
 
 
@@ -115,7 +115,7 @@ class AtomicStateWriter:
                 self.write_queue.put_nowait({
                     'action': 'write_if_pending'
                 })
-            except:
+            except Full:
                 pass  # Queue might be full, but we already stored pending_write
             
             return True
@@ -226,7 +226,7 @@ class AtomicStateWriter:
                 tmp_file = self.state_file.with_suffix('.tmp')
                 if tmp_file.exists():
                     tmp_file.unlink()
-            except:
+            except (OSError, FileNotFoundError):
                 pass
             
             return False

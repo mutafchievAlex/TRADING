@@ -6,12 +6,22 @@ This module handles all trade execution:
 - Stop loss and take profit placement
 - Order status tracking
 - Error handling for failed orders
+- Input validation for all order parameters
 """
 
 import MetaTrader5 as mt5
 import logging
 from typing import Optional, Dict, TYPE_CHECKING
 from datetime import datetime
+
+from src.exceptions import (
+    OrderPlacementError,
+    OrderModificationError,
+    OrderCancellationError,
+    InvalidOrderParametersError,
+    MT5ConnectionError
+)
+from src.utils.mt5_validator import MT5OrderValidator
 
 if TYPE_CHECKING:
     from config import AppConfig
@@ -50,6 +60,7 @@ class ExecutionEngine:
         self.symbol = symbol
         self.magic_number = magic_number
         self.logger = logging.getLogger(__name__)
+        self.validator = MT5OrderValidator(mt5)
 
     def _validate_connection_and_symbol(self) -> bool:
         """Validate MT5 connection and symbol tradeability before sending orders."""
@@ -84,7 +95,7 @@ class ExecutionEngine:
                          deviation: int = 20,
                          comment: str = "Double Bottom Strategy") -> Optional[Dict]:
         """
-        Send a market order to MT5.
+        Send a market order to MT5 with full parameter validation.
         
         Args:
             order_type: "BUY" or "SELL" (but strategy is LONG ONLY)
@@ -96,23 +107,42 @@ class ExecutionEngine:
             
         Returns:
             Dict with order result, or None if failed
+            
+        Raises:
+            InvalidOrderParametersError: If parameters are invalid
+            OrderPlacementError: If order placement fails
+            MT5ConnectionError: If MT5 not connected
         """
         try:
             # Validate order type (LONG ONLY)
             if order_type != "BUY":
-                self.logger.error(f"Invalid order type: {order_type}. Strategy is LONG ONLY.")
-                return None
+                raise InvalidOrderParametersError(
+                    f"Invalid order type: {order_type}. Strategy is LONG ONLY."
+                )
 
             if not self._validate_connection_and_symbol():
-                return None
+                raise MT5ConnectionError("MT5 not connected or symbol not available")
             
             # Get current price
             tick = mt5.symbol_info_tick(self.symbol)
             if tick is None:
-                self.logger.error(f"Failed to get tick data for {self.symbol}")
-                return None
+                raise OrderPlacementError(f"Failed to get tick data for {self.symbol}")
             
             price = tick.ask  # For BUY orders, use ask price
+            
+            # Validate order parameters using the validator
+            normalized_volume, validated_sl, validated_tp = self.validator.validate_order_params(
+                symbol=self.symbol,
+                volume=volume,
+                order_type=mt5.ORDER_TYPE_BUY,
+                price=price,
+                sl=stop_loss,
+                tp=take_profit,
+                direction="LONG"
+            )
+            
+            # Use normalized volume from validator
+            volume = normalized_volume
             
             # Prepare order request
             request = {
@@ -128,31 +158,35 @@ class ExecutionEngine:
                 "type_filling": mt5.ORDER_FILLING_IOC,  # Immediate or cancel
             }
             
-            # Add stop loss if provided
-            if stop_loss is not None:
+            # Add stop loss if provided (use validated value if available)
+            if validated_sl is not None:
+                request["sl"] = validated_sl
+            elif stop_loss is not None:
                 request["sl"] = stop_loss
             
-            # Add take profit if provided
-            if take_profit is not None:
+            # Add take profit if provided (use validated value if available)
+            if validated_tp is not None:
+                request["tp"] = validated_tp
+            elif take_profit is not None:
                 request["tp"] = take_profit
             
             # Send order
             self.logger.info(f"Sending {order_type} order: {volume} lots @ {price:.5f}")
-            if stop_loss:
-                self.logger.info(f"  SL: {stop_loss:.5f}")
-            if take_profit:
-                self.logger.info(f"  TP: {take_profit:.5f}")
+            if request.get("sl"):
+                self.logger.info(f"  SL: {request['sl']:.5f}")
+            if request.get("tp"):
+                self.logger.info(f"  TP: {request['tp']:.5f}")
             
             result = mt5.order_send(request)
             
             if result is None:
-                self.logger.error("order_send() returned None")
-                return None
+                raise OrderPlacementError("order_send() returned None")
             
             # Check result
             if result.retcode != mt5.TRADE_RETCODE_DONE:
-                self.logger.error(f"Order failed: retcode={result.retcode}, comment={result.comment}")
-                return None
+                raise OrderPlacementError(
+                    f"Order failed: retcode={result.retcode}, comment={result.comment}"
+                )
             
             # Success
             order_result = {
@@ -174,9 +208,14 @@ class ExecutionEngine:
             
             return order_result
             
+        except (InvalidOrderParametersError, OrderPlacementError, MT5ConnectionError):
+            raise
+        except OSError as e:
+            self.logger.error(f"OS error sending order: {e}")
+            raise OrderPlacementError(f"OS error during order placement: {e}")
         except Exception as e:
-            self.logger.error(f"Error sending order: {e}")
-            return None
+            self.logger.error(f"Unexpected error sending order: {e}", exc_info=True)
+            raise OrderPlacementError(f"Unexpected error during order placement: {e}")
     
     def get_open_positions(self) -> list:
         """
