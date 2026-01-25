@@ -48,6 +48,50 @@ def test_calculate_position_size(sample_symbol_info):
     assert position_size <= sample_symbol_info['volume_max']
 
 
+def test_calculate_position_size_respects_volume_step():
+    """Ensure sizing rounds down to the configured volume step."""
+    engine = RiskEngine(risk_percent=1.0)
+
+    symbol_info = {
+        'trade_contract_size': 100.0,
+        'volume_min': 0.01,
+        'volume_max': 10.0,
+        'volume_step': 0.1,
+    }
+
+    equity = 10000.0
+    entry_price = 100.0
+    stop_loss = 93.0  # price risk = 7 -> size ~ 0.142 -> round to 0.1
+
+    position_size = engine.calculate_position_size(
+        equity, entry_price, stop_loss, symbol_info
+    )
+
+    assert position_size == 0.1
+
+
+def test_calculate_position_size_steps_down_on_risk_validation():
+    """Ensure sizing reduces when commission pushes risk over the limit."""
+    engine = RiskEngine(risk_percent=1.0, commission_per_lot=50.0)
+
+    symbol_info = {
+        'trade_contract_size': 100.0,
+        'volume_min': 0.01,
+        'volume_max': 1.0,
+        'volume_step': 0.1,
+    }
+
+    equity = 10000.0
+    entry_price = 100.0
+    stop_loss = 99.0  # price risk = 1 -> size = 1.0 before step-down
+
+    position_size = engine.calculate_position_size(
+        equity, entry_price, stop_loss, symbol_info
+    )
+
+    assert position_size == 0.9
+
+
 def test_calculate_position_size_zero_risk(sample_symbol_info):
     """Test position size with zero risk distance."""
     engine = RiskEngine(risk_percent=1.0)
@@ -107,6 +151,22 @@ def test_validate_risk(sample_symbol_info):
     )
     
     assert is_valid
+
+
+def test_validate_risk_rejects_over_limit(sample_symbol_info):
+    """Risk validation should fail when risk exceeds tolerance."""
+    engine = RiskEngine(risk_percent=1.0, commission_per_lot=10.0)
+
+    equity = 10000.0
+    entry_price = 2000.0
+    stop_loss = 1990.0
+    position_size = 2.0
+
+    is_valid = engine.validate_risk(
+        equity, entry_price, stop_loss, position_size, sample_symbol_info
+    )
+
+    assert not is_valid
 
 
 def test_get_max_drawdown_limit():
