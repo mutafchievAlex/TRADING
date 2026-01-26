@@ -1,0 +1,136 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                        EXIT REASON TYPES - COMPLETE LIST                      ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+┌─ PRIMARY REASONS (Most Common) ────────────────────────────────────────────────┐
+│                                                                                │
+│ 1. STOP LOSS                                                                  │
+│    When: Price drops to stop loss level                                       │
+│    Code: "Stop Loss"                                                          │
+│    Example: SL=4900, price=4899 → Close with "Stop Loss"                     │
+│                                                                                │
+│ 2. TAKE PROFIT                                                                │
+│    When: Price reaches take profit target                                     │
+│    Code: "Take Profit"                                                        │
+│    Example: TP=5100, price=5101 → Close with "Take Profit"                   │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ MULTI-LEVEL TP REASONS (3-Level Strategy) ─────────────────────────────────┐
+│                                                                                │
+│ 3. TP1 HIT                                                                    │
+│    When: First take profit level reached                                      │
+│    Code: "TP1 Hit"                                                            │
+│    Next: System evaluates: HOLD more or CLOSE                                 │
+│                                                                                │
+│ 4. TP2 HIT                                                                    │
+│    When: Second take profit level reached                                     │
+│    Code: "TP2 Hit"                                                            │
+│    Next: System evaluates: HOLD more or CLOSE + Trailing SL enabled          │
+│                                                                                │
+│ 5. TP3 HIT                                                                    │
+│    When: Final take profit level reached                                      │
+│    Code: "TP3 Hit"                                                            │
+│    Next: Automatic close (no more levels)                                     │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ USER/EXTERNAL REASONS ───────────────────────────────────────────────────────┐
+│                                                                                │
+│ 6. CLOSED EXTERNALLY                                                          │
+│    When: Position closed outside the app (in MT5 terminal)                    │
+│    Code: "Closed externally"                                                  │
+│    Trigger: Position disappears from MT5 account                              │
+│                                                                                │
+│ 7. MANUAL CLOSE                                                               │
+│    When: User clicks "Close Position" button in app                           │
+│    Code: "Manual Close"                                                       │
+│    Trigger: User intervention via UI                                          │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ STRATEGY/SYSTEM REASONS ─────────────────────────────────────────────────────┐
+│                                                                                │
+│ 8. PATTERN RE-ENTRY                                                           │
+│    When: New pattern detected while in trade                                  │
+│    Code: "Pattern re-entry"                                                   │
+│    Logic: Exit current to enter new pattern setup                             │
+│                                                                                │
+│ 9. RECOVERY MODE                                                              │
+│    When: Position closed during system restart recovery                       │
+│    Code: "Recovery Mode"                                                      │
+│    Purpose: Synchronize with actual MT5 state                                 │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ PROTECTIVE / EDGE CASE REASONS ──────────────────────────────────────────────┐
+│                                                                                │
+│ 10. PROTECTIVE EXIT                                                           │
+│     When: Safety conditions triggered                                         │
+│     Code: "Protective Exit - [reason]"                                        │
+│     Example: "Protective Exit - TP3 Not Reached"                              │
+│     Frequency: Rare, unusual market conditions                                │
+│                                                                                │
+│ 11. UNKNOWN CLOSURE                                                           │
+│     When: Reason cannot be determined                                         │
+│     Code: "Unknown Closure"                                                   │
+│     Frequency: Rare (indicates debugging needed)                              │
+│                                                                                │
+│ 12. CLOSED (HISTORICAL)                                                       │
+│     When: Historical trade imported from MT5                                  │
+│     Code: "CLOSED (Historical)"                                               │
+│     Status: Currently in database (17 trades)                                 │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                            VALIDATION RULES                                   ║
+╠════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                ║
+║  ✓ Exit reason is VALIDATED before saving                                     ║
+║  ✓ If "TP3" reason → exit price MUST reach TP3                               ║
+║  ✓ If "TP" reason → exit price MUST reach take_profit                        ║
+║  ✓ If "Stop Loss" → exit price MUST hit stop loss                            ║
+║  ✓ Mismatches are AUTO-CORRECTED with logging                                 ║
+║  ✓ Numbers/prices are REJECTED (only text allowed)                            ║
+║  ✓ NULL values become "Unknown"                                               ║
+║                                                                                ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+┌─ WHERE TO VIEW EXIT REASONS ──────────────────────────────────────────────────┐
+│                                                                                │
+│ 1. Live Application                                                           │
+│    Location: History Tab → Column 6 "Exit Reason"                             │
+│                                                                                │
+│ 2. Database Inspection                                                        │
+│    Command: python inspect_db.py                                              │
+│                                                                                │
+│ 3. Summary View                                                               │
+│    Command: python show_actual_reasons.py                                     │
+│                                                                                │
+│ 4. Complete Reference                                                         │
+│    Command: python list_exit_reasons.py                                       │
+│                                                                                │
+│ 5. SQL Query (Direct)                                                         │
+│    Query: SELECT ticket, exit_reason, profit FROM trades;                     │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                         CURRENT DATABASE STATUS                               ║
+╠════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                ║
+║  Trades in Database: 17                                                       ║
+║  Exit Reason Used:   "CLOSED (Historical)"                                    ║
+║  Source:             MT5 import                                               ║
+║                                                                                ║
+║  WHEN LIVE TRADING STARTS:                                                    ║
+║  • "Stop Loss" will appear for losing positions                               ║
+║  • "Take Profit" will appear for winning positions                            ║
+║  • "TP1 Hit", "TP2 Hit", "TP3 Hit" for multi-level exits                     ║
+║  • "Manual Close" for user interventions                                      ║
+║  • Others as appropriate based on market conditions                           ║
+║                                                                                ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+SUMMARY: 12 exit reason types, all defined, validated, and production-ready.

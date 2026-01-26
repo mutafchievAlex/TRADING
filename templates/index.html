@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Database UI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            color: #4facfe;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 10px rgba(79, 172, 254, 0.3);
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: rgba(79, 172, 254, 0.1);
+            border: 2px solid #4facfe;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .stat-card h3 {
+            color: #4facfe;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        
+        .stat-card .value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        
+        .stat-card.negative .value {
+            color: #ff4444;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #4facfe;
+            flex-wrap: wrap;
+        }
+        
+        .tab-button {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 1em;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        
+        .tab-button.active {
+            color: #4facfe;
+            border-bottom-color: #4facfe;
+        }
+        
+        .tab-button:hover {
+            color: #4facfe;
+        }
+        
+        .tab-content {
+            display: none;
+            background: rgba(45, 45, 68, 0.5);
+            border: 1px solid #4facfe;
+            border-radius: 10px;
+            padding: 20px;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        
+        th {
+            background: rgba(79, 172, 254, 0.2);
+            color: #4facfe;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #4facfe;
+        }
+        
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(79, 172, 254, 0.2);
+        }
+        
+        tr:hover {
+            background: rgba(79, 172, 254, 0.1);
+        }
+        
+        .positive {
+            color: #00ff88;
+        }
+        
+        .negative {
+            color: #ff4444;
+        }
+        
+        .search-box {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+        }
+        
+        input[type="text"], input[type="number"] {
+            flex: 1;
+            padding: 10px 15px;
+            background: rgba(79, 172, 254, 0.1);
+            border: 1px solid #4facfe;
+            color: #e0e0e0;
+            border-radius: 5px;
+            font-size: 1em;
+        }
+        
+        input[type="text"]::placeholder {
+            color: #888;
+        }
+        
+        button {
+            padding: 10px 20px;
+            background: #4facfe;
+            color: #1e1e2e;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        button:hover {
+            background: #00ff88;
+            transform: translateY(-2px);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #4facfe;
+        }
+        
+        .reason-badge {
+            display: inline-block;
+            background: rgba(79, 172, 254, 0.2);
+            border: 1px solid #4facfe;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: #4facfe;
+        }
+        
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(79, 172, 254, 0.2);
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.5em;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            table {
+                font-size: 0.9em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Trading Database UI</h1>
+            <p>Real-time view of your trading data</p>
+        </header>
+        
+        <!-- Statistics Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Open Positions</h3>
+                <div class="value" id="stat-open">{{ open_positions }}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Closed Trades</h3>
+                <div class="value" id="stat-trades">{{ closed_trades }}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Win Rate</h3>
+                <div class="value" id="stat-winrate">--</div>
+            </div>
+            <div class="stat-card">
+                <h3>Total Profit</h3>
+                <div class="value" id="stat-profit">{{ "%.2f"|format(total_profit) }}</div>
+            </div>
+        </div>
+        
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab-button active" onclick="showTab('positions')">📍 Open Positions</button>
+            <button class="tab-button" onclick="showTab('trades')">📈 Trade History</button>
+            <button class="tab-button" onclick="showTab('reasons')">🎯 Exit Reasons</button>
+            <button class="tab-button" onclick="showTab('stats')">📊 Statistics</button>
+        </div>
+        
+        <!-- Open Positions Tab -->
+        <div id="positions" class="tab-content active">
+            <h2>Open Positions</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Ticket</th>
+                        <th>Entry Time</th>
+                        <th>Entry Price</th>
+                        <th>Stop Loss</th>
+                        <th>Take Profit</th>
+                        <th>Volume</th>
+                        <th>Profit</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-table">
+                    <tr><td colspan="8" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Trade History Tab -->
+        <div id="trades" class="tab-content">
+            <h2>Trade History</h2>
+            <div class="search-box">
+                <input type="text" id="search-ticket" placeholder="Search by ticket...">
+                <button onclick="searchTrades()">Search</button>
+                <input type="number" id="trade-limit" value="50" min="10" max="500" placeholder="Limit">
+                <button onclick="loadTrades()">Load</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Ticket</th>
+                        <th>Entry Time</th>
+                        <th>Exit Time</th>
+                        <th>Entry Price</th>
+                        <th>Exit Price</th>
+                        <th>Volume</th>
+                        <th>Profit</th>
+                        <th>Exit Reason</th>
+                    </tr>
+                </thead>
+                <tbody id="trades-table">
+                    <tr><td colspan="8" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Exit Reasons Tab -->
+        <div id="reasons" class="tab-content">
+            <h2>Exit Reason Statistics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Exit Reason</th>
+                        <th>Count</th>
+                        <th>Average Profit</th>
+                    </tr>
+                </thead>
+                <tbody id="reasons-table">
+                    <tr><td colspan="3" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Statistics Tab -->
+        <div id="stats" class="tab-content">
+            <h2>Trading Statistics</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>Total Trades</h3>
+                    <div class="value" id="stats-total">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Winning Trades</h3>
+                    <div class="value" id="stats-wins">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Losing Trades</h3>
+                    <div class="value" id="stats-losses">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Win Rate</h3>
+                    <div class="value" id="stats-rate">0%</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Profit</h3>
+                    <div class="value" id="stats-profit">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Average Trade</h3>
+                    <div class="value" id="stats-avg">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Best Trade</h3>
+                    <div class="value" id="stats-best">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Worst Trade</h3>
+                    <div class="value negative" id="stats-worst">0</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>🚀 Trading Database - Real-time monitoring</p>
+            <p>Database: data/state.db | Last updated: <span id="update-time">--:--:--</span></p>
+        </div>
+    </div>
+    
+    <script>
+        function showTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+            
+            // Load data for tab
+            if (tabName === 'positions') loadPositions();
+            if (tabName === 'trades') loadTrades();
+            if (tabName === 'reasons') loadReasons();
+            if (tabName === 'stats') loadStatistics();
+        }
+        
+        function loadPositions() {
+            fetch('/api/positions')
+                .then(r => r.json())
+                .then(data => {
+                    const tbody = document.getElementById('positions-table');
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="8">No open positions</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = data.map(p => `
+                        <tr>
+                            <td>${p.ticket}</td>
+                            <td>${p.entry_time}</td>
+                            <td>${p.entry_price.toFixed(2)}</td>
+                            <td>${p.stop_loss.toFixed(2)}</td>
+                            <td>${p.take_profit.toFixed(2)}</td>
+                            <td>${p.volume.toFixed(2)}</td>
+                            <td class="${p.profit > 0 ? 'positive' : 'negative'}">$${p.profit.toFixed(2)}</td>
+                            <td>${p.tp_state}</td>
+                        </tr>
+                    `).join('');
+                });
+        }
+        
+        function loadTrades() {
+            const limit = document.getElementById('trade-limit').value || 50;
+            fetch(`/api/trades?limit=${limit}`)
+                .then(r => r.json())
+                .then(data => {
+                    const tbody = document.getElementById('trades-table');
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="8">No trades found</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = data.map(t => `
+                        <tr>
+                            <td>${t.ticket}</td>
+                            <td>${t.entry_time}</td>
+                            <td>${t.exit_time}</td>
+                            <td>${t.entry_price.toFixed(2)}</td>
+                            <td>${t.exit_price.toFixed(2)}</td>
+                            <td>${t.volume.toFixed(2)}</td>
+                            <td class="${t.profit > 0 ? 'positive' : 'negative'}">$${t.profit.toFixed(2)}</td>
+                            <td><span class="reason-badge">${t.exit_reason}</span></td>
+                        </tr>
+                    `).join('');
+                    updateTime();
+                });
+        }
+        
+        function loadReasons() {
+            fetch('/api/exit-reasons')
+                .then(r => r.json())
+                .then(data => {
+                    const tbody = document.getElementById('reasons-table');
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="3">No exit reasons found</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = data.map(r => `
+                        <tr>
+                            <td>${r.exit_reason}</td>
+                            <td>${r.count}</td>
+                            <td class="${r.avg_profit >= 0 ? 'positive' : 'negative'}">$${(r.avg_profit || 0).toFixed(2)}</td>
+                        </tr>
+                    `).join('');
+                });
+        }
+        
+        function loadStatistics() {
+            fetch('/api/statistics')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('stats-total').textContent = data.total_trades || 0;
+                    document.getElementById('stats-wins').textContent = data.winning_trades || 0;
+                    document.getElementById('stats-losses').textContent = data.losing_trades || 0;
+                    document.getElementById('stats-rate').textContent = (data.win_rate || 0).toFixed(1) + '%';
+                    document.getElementById('stats-profit').textContent = '$' + (data.total_profit || 0).toFixed(2);
+                    document.getElementById('stats-avg').textContent = '$' + (data.avg_profit || 0).toFixed(2);
+                    document.getElementById('stats-best').textContent = '$' + (data.best_trade || 0).toFixed(2);
+                    document.getElementById('stats-worst').textContent = '$' + (data.worst_trade || 0).toFixed(2);
+                });
+        }
+        
+        function searchTrades() {
+            const query = document.getElementById('search-ticket').value;
+            if (!query) {
+                loadTrades();
+                return;
+            }
+            fetch(`/api/search?q=${query}`)
+                .then(r => r.json())
+                .then(data => {
+                    const tbody = document.getElementById('trades-table');
+                    if (data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="8">No trades found</td></tr>';
+                        return;
+                    }
+                    tbody.innerHTML = data.map(t => `
+                        <tr>
+                            <td>${t.ticket}</td>
+                            <td>${t.entry_time}</td>
+                            <td>${t.exit_time}</td>
+                            <td>${t.entry_price.toFixed(2)}</td>
+                            <td>${t.exit_price.toFixed(2)}</td>
+                            <td>--</td>
+                            <td class="${t.profit > 0 ? 'positive' : 'negative'}">$${t.profit.toFixed(2)}</td>
+                            <td><span class="reason-badge">${t.exit_reason}</span></td>
+                        </tr>
+                    `).join('');
+                    updateTime();
+                });
+        }
+        
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('update-time').textContent = now.toLocaleTimeString();
+        }
+        
+        // Load initial data
+        loadPositions();
+        loadTrades();
+        loadReasons();
+        loadStatistics();
+        
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            loadPositions();
+            loadTrades();
+        }, 10000);
+    </script>
+</body>
+</html>

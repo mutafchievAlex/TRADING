@@ -26,7 +26,7 @@ wheels/
 venv/
 ENV/
 env/
-.venv
+.venv/
 
 # IDE
 .vscode/
@@ -39,10 +39,14 @@ env/
 # Logs
 logs/
 *.log
+system.log.*
 
-# Data
+# Data (local/runtime)
+data/state.db
 data/state.json
-data/historical/*.csv
+data/backups/
+data/historical/
+data/*.sqlite
 
 # Configuration (sensitive)
 config/config.yaml

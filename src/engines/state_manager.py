@@ -153,7 +153,13 @@ class StateManager:
             }
             
             self.open_positions.append(new_position)
-            self.last_trade_time = new_position['entry_time']
+            
+            # Update last_trade_time to the more recent of open or close event
+            # This ensures cooldown tracks the latest trading activity
+            entry_time = new_position['entry_time']
+            entry_datetime = entry_time if isinstance(entry_time, datetime) else datetime.fromisoformat(entry_time)
+            if self.last_trade_time is None or entry_datetime > self.last_trade_time:
+                self.last_trade_time = entry_time
             
             self.logger.info(f"Position opened: Ticket={new_position['ticket']}, "
                            f"Entry={new_position['entry_price']:.2f}, "
@@ -292,6 +298,12 @@ class StateManager:
                 # Remove closed position
                 self.open_positions.remove(position_to_close)
                 
+                # Update last_trade_time to exit time for cooldown calculation
+                # Cooldown should be from the LATEST event (open or close), whichever is more recent
+                exit_datetime = exit_time if isinstance(exit_time, datetime) else datetime.fromisoformat(exit_time)
+                if self.last_trade_time is None or exit_datetime > self.last_trade_time:
+                    self.last_trade_time = exit_time
+                
                 self.save_state()
             
         except Exception as e:
@@ -375,7 +387,21 @@ class StateManager:
                     self.logger.info(f"Ticket {ticket}: TP state {old_state} -> {new_tp_state}, "
                                    f"SL updated to {sl_text}")
                     
-                    self.save_state()
+                    # Optimize DB update - only update changed position
+                    if self.storage_backend == "db" and self.db_store:
+                        updates = {'tp_state': new_tp_state}
+                        if transition_time is not None:
+                            updates['tp_state_changed_at'] = transition_time
+                        if new_stop_loss is not None:
+                            updates['current_stop_loss'] = new_stop_loss
+                        if bars_after_tp1 is not None:
+                            updates['bars_held_after_tp1'] = bars_after_tp1
+                        if bars_after_tp2 is not None:
+                            updates['bars_held_after_tp2'] = bars_after_tp2
+                        self.db_store.update_position(ticket, updates)
+                    else:
+                        self.save_state()
+                    
                     return True
             
             self.logger.warning(f"Position ticket {ticket} not found")
@@ -426,7 +452,26 @@ class StateManager:
                     self.logger.debug(f"Ticket {ticket}: TP exit metadata updated - "
                                     f"TP1={post_tp1_decision}, TP2={post_tp2_decision}")
                     
-                    self.save_state()
+                    # Optimize DB update - only update changed position
+                    if self.storage_backend == "db" and self.db_store:
+                        updates = {}
+                        if post_tp1_decision is not None:
+                            updates['post_tp1_decision'] = post_tp1_decision
+                        if tp1_exit_reason is not None:
+                            updates['tp1_exit_reason'] = tp1_exit_reason
+                        if post_tp2_decision is not None:
+                            updates['post_tp2_decision'] = post_tp2_decision
+                        if tp2_exit_reason is not None:
+                            updates['tp2_exit_reason'] = tp2_exit_reason
+                        if trailing_sl_level is not None:
+                            updates['trailing_sl_level'] = trailing_sl_level
+                        if trailing_sl_enabled is not None:
+                            updates['trailing_sl_enabled'] = trailing_sl_enabled
+                        if updates:
+                            self.db_store.update_position(ticket, updates)
+                    else:
+                        self.save_state()
+                    
                     return True
             
             self.logger.warning(f"Position ticket {ticket} not found for metadata update")
@@ -463,6 +508,7 @@ class StateManager:
             True if in cooldown, False otherwise
         """
         if self.last_trade_time is None:
+            self.logger.debug("No last trade time recorded - cooldown not active")
             return False
         
         # Convert string to datetime if needed
@@ -470,7 +516,20 @@ class StateManager:
             self.last_trade_time = datetime.fromisoformat(self.last_trade_time)
         
         hours_since_last_trade = (current_time - self.last_trade_time).total_seconds() / 3600
-        return hours_since_last_trade < cooldown_hours
+        in_cooldown = hours_since_last_trade < cooldown_hours
+        
+        # Log cooldown state for debugging
+        remaining_hours = cooldown_hours - hours_since_last_trade if in_cooldown else 0
+        self.logger.debug(
+            f"Cooldown check: last_trade={self.last_trade_time.isoformat()}, "
+            f"current={current_time.isoformat()}, "
+            f"hours_elapsed={hours_since_last_trade:.2f}, "
+            f"cooldown_period={cooldown_hours}h, "
+            f"in_cooldown={in_cooldown}, "
+            f"remaining={remaining_hours:.2f}h"
+        )
+        
+        return in_cooldown
     
     def get_statistics(self) -> Dict:
         """
@@ -516,6 +575,12 @@ class StateManager:
 
     def _build_state_data(self) -> Dict:
         """Build state dict for serialization, converting non-serializable types."""
+        
+        # Ensure last_trade_time is always current (guard against stale values)
+        # Derive from transactions if internal value is missing or stale
+        if not self.last_trade_time:
+            self.last_trade_time = self._derive_last_trade_time()
+        
         state_data = {
             'open_positions': [],
             'trade_history': self.trade_history,
@@ -571,18 +636,21 @@ class StateManager:
     
     def save_state(self):
         """
-        Persist current state (file or DB).
+        Persist current state to both DB and file for redundancy.
 
         If file + atomic writes enabled: queues write, batched every 5 seconds.
         If file + atomic writes disabled: direct write (NOT recommended).
+        
+        Always maintains JSON backup even when using DB backend.
         """
         try:
             state_data = self._build_state_data()
 
+            # Save to database if enabled
             if self.storage_backend == "db" and self.db_store:
                 self.db_store.save_state(state_data)
-                return
-
+            
+            # ALWAYS save JSON as backup - critical for disaster recovery
             if self.atomic_writer:
                 self.atomic_writer.queue_write(state_data)
             else:
@@ -680,9 +748,13 @@ class StateManager:
         self.total_profit = state_data.get('total_profit', 0.0)
         self.last_regime_state = state_data.get('last_regime_state')
 
+        # Load last_trade_time with fallback logic
         last_trade_str = state_data.get('last_trade_time')
         if last_trade_str:
             self.last_trade_time = datetime.fromisoformat(last_trade_str)
+        else:
+            # If not recorded, derive from most recent transaction (open or closed)
+            self.last_trade_time = self._derive_last_trade_time()
 
         source = (
             "database"
@@ -693,6 +765,42 @@ class StateManager:
         self.logger.info(f"  Total trades: {self.total_trades}")
         self.logger.info(f"  Total profit: ${self.total_profit:.2f}")
         self.logger.info(f"  Open positions: {len(self.open_positions)}")
+        self.logger.info(f"  Last trade time: {self.last_trade_time}")
+
+    def _derive_last_trade_time(self) -> Optional[datetime]:
+        """
+        Derive last_trade_time from open positions and trade history.
+        Used as fallback when last_trade_time is not recorded.
+        Returns the most recent entry_time or exit_time.
+        """
+        all_times = []
+        
+        # Get times from open positions
+        for pos in self.open_positions:
+            entry_str = pos.get('entry_time')
+            if entry_str:
+                try:
+                    entry_dt = entry_str if isinstance(entry_str, datetime) else datetime.fromisoformat(entry_str)
+                    all_times.append(entry_dt)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Get times from closed trades
+        for trade in self.trade_history:
+            exit_str = trade.get('exit_time')
+            if exit_str:
+                try:
+                    exit_dt = exit_str if isinstance(exit_str, datetime) else datetime.fromisoformat(exit_str)
+                    all_times.append(exit_dt)
+                except (ValueError, TypeError):
+                    pass
+        
+        if all_times:
+            latest = max(all_times)
+            self.logger.warning(f"Derived last_trade_time from transaction history: {latest}")
+            return latest
+        
+        return None
 
 
     def set_regime_state(self, regime_state: Dict):
