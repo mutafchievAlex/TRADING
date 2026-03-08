@@ -1249,12 +1249,17 @@ class TradingController(QObject):
 
             # 4. Check positions - support pyramiding
             pyramiding = self.config.get('strategy.pyramiding', 1)
+            
+            # CRITICAL FIX: Sync BEFORE monitoring to prevent false "Closed externally"
+            # If we monitor before syncing, positions just opened won't be in MT5 yet
+            # and will be incorrectly marked as closed externally (BUG: Race Condition)
             self._sync_live_positions()
+            
             can_open_new = self.state_manager.can_open_new_position(max_positions=pyramiding)
             has_positions = self.state_manager.has_open_position()
             
             if has_positions:
-                # Monitor existing positions
+                # Monitor existing positions (now with accurate broker state from sync)
                 self._monitor_positions(current_bar)
             
             # ALWAYS evaluate entry conditions for UI display (even if pyramid limit reached)
@@ -1279,12 +1284,16 @@ class TradingController(QObject):
         """Ensure live broker positions are tracked in the state manager/UI."""
         try:
             live_positions = self.execution_engine.get_open_positions()
+            self.logger.debug(f"[_sync_live_positions] Total live positions from broker: {len(live_positions) if live_positions else 0}")
+            
             if not live_positions:
                 return
 
             tracked_positions = {
                 position.get('ticket'): position for position in self.state_manager.get_all_positions()
             }
+            self.logger.debug(f"[_sync_live_positions] Tracked positions in state: {len(tracked_positions)}")
+            
             added_tickets = []
             updated_tickets = []
             for live_position in live_positions:
@@ -1308,17 +1317,96 @@ class TradingController(QObject):
                     continue
 
                 direction = 1 if live_position.get('type') == 'BUY' else -1
+                
+                # Extract entry time (handle both datetime and timestamp formats)
+                entry_time = live_position.get('time')
+                if entry_time and not isinstance(entry_time, datetime):
+                    try:
+                        if isinstance(entry_time, (int, float)):
+                            entry_time = datetime.fromtimestamp(entry_time)
+                        elif isinstance(entry_time, str):
+                            entry_time = datetime.fromisoformat(entry_time)
+                    except Exception as e:
+                        self.logger.warning(f"Could not parse entry_time for ticket {ticket}: {e}")
+                        entry_time = datetime.now()
+                
+                self.logger.info(f"🔵 EXTERNAL POSITION DETECTED: Ticket={ticket}, "
+                               f"Entry={live_position.get('price_open', 0.0):.2f}, "
+                               f"Volume={live_position.get('volume', 0.0)}, "
+                               f"Entry Time={entry_time}")
+                
+                # Calculate TP levels for external position
+                entry_price = live_position.get('price_open', 0.0)
+                stop_loss = live_position.get('stop_loss', 0.0)
+                take_profit = live_position.get('take_profit', 0.0)
+                
+                # Check if SL/TP need to be calculated and set
+                needs_sl = stop_loss == 0.0
+                needs_tp = take_profit == 0.0
+                
+                if needs_sl or needs_tp:
+                    self.logger.warning(f"External position {ticket} missing SL/TP - calculating and setting...")
+                    
+                    # Get current market data for ATR calculation
+                    current_bar = self.market_data.get_current_bar()
+                    if current_bar:
+                        # Get ATR from indicator engine
+                        atr = self.indicator_engine.get_atr()
+                        if atr and atr > 0:
+                            # Calculate SL/TP based on strategy rules
+                            if needs_sl:
+                                # For LONG: SL = entry - (2 * ATR)
+                                # For SHORT: SL = entry + (2 * ATR)
+                                sl_distance = 2.0 * atr
+                                stop_loss = entry_price - sl_distance if direction == 1 else entry_price + sl_distance
+                                self.logger.info(f"Calculated SL: {stop_loss:.2f} (ATR={atr:.2f})")
+                            
+                            if needs_tp:
+                                # Calculate multi-level TP using calculated SL
+                                tp_levels = self.strategy_engine.multi_level_tp.calculate_tp_levels(
+                                    entry_price=entry_price,
+                                    stop_loss=stop_loss,
+                                    direction=direction
+                                )
+                                if tp_levels:
+                                    take_profit = tp_levels.get('tp3', 0.0)  # Use TP3 as final target
+                                    self.logger.info(f"Calculated TP3: {take_profit:.2f}")
+                            
+                            # Set SL/TP in MT5
+                            if (needs_sl or needs_tp):
+                                success = self.execution_engine.modify_position(
+                                    ticket=ticket,
+                                    stop_loss=stop_loss if needs_sl else None,
+                                    take_profit=take_profit if needs_tp else None
+                                )
+                                if success:
+                                    self.logger.info(f"✓ Set SL/TP for external position {ticket}")
+                                else:
+                                    self.logger.error(f"✗ Failed to set SL/TP for external position {ticket}")
+                
+                # Calculate TP levels for state tracking
+                tp_levels = self.strategy_engine.multi_level_tp.calculate_tp_levels(
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    direction=direction
+                )
+                
                 self.state_manager.open_position({
                     'ticket': ticket,
-                    'entry_price': live_position.get('price_open', 0.0),
-                    'stop_loss': live_position.get('stop_loss', 0.0),
-                    'take_profit': live_position.get('take_profit', 0.0),
+                    'entry_price': entry_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
                     'volume': live_position.get('volume', 0.0),
-                    'entry_time': live_position.get('time'),
+                    'entry_time': entry_time,
                     'direction': direction,
                     'price_current': live_position.get('price_current', 0.0),
                     'profit': live_position.get('profit', 0.0),
                     'swap': live_position.get('swap', 0.0),
+                    'tp_state': 'IN_TRADE',
+                    'tp1_price': tp_levels.get('tp1') if tp_levels else None,
+                    'tp2_price': tp_levels.get('tp2') if tp_levels else None,
+                    'tp3_price': tp_levels.get('tp3') if tp_levels else None,
+                    'current_stop_loss': stop_loss,
                 })
                 added_tickets.append(ticket)
 
@@ -1329,9 +1417,13 @@ class TradingController(QObject):
                     {'positions': positions}
                 )
                 if added_tickets:
+                    msg = f"✓ Added {len(added_tickets)} external position(s): {added_tickets}"
+                    self.logger.info(msg)
                     self.ui_queue.post_event(UIEventType.LOG_MESSAGE, {
-                        'message': f"Recovered {len(added_tickets)} live position(s) from broker."
+                        'message': msg
                     })
+                if updated_tickets:
+                    self.logger.debug(f"Updated {len(updated_tickets)} position(s): {updated_tickets}")
         except Exception as exc:
             self.logger.error(f"Error syncing live positions: {exc}", exc_info=True)
 
@@ -1658,11 +1750,31 @@ class TradingController(QObject):
                 
                 # Check if position still exists in MT5
                 if ticket not in live_tickets:
-                    # Position closed externally
+                    # FIX: Don't close recently-opened positions that haven't synced yet
+                    # Position might be just created and not yet returned by MT5
+                    entry_time = position_data.get('entry_time')
+                    if isinstance(entry_time, str):
+                        # Parse ISO format time
+                        entry_time = datetime.fromisoformat(entry_time)
+                    
+                    time_since_entry = None
+                    if entry_time:
+                        time_since_entry = (datetime.now() - entry_time).total_seconds()
+                    
+                    # Grace period: 5 seconds for position to appear in MT5
+                    if time_since_entry and time_since_entry < 5:
+                        self.logger.debug(
+                            f"Position {ticket} just opened ({time_since_entry:.1f}s ago), "
+                            f"not yet visible in MT5 - skipping closure check"
+                        )
+                        continue  # ← Skip false positive, check again next iteration
+                    
+                    # Position truly closed externally (after grace period)
                     self.logger.warning(f"Position {ticket} closed externally")
                     self.state_manager.close_position(
                         exit_price=current_bar['close'],
                         exit_reason="Closed externally",
+                        exit_time=current_bar.get('time'),
                         ticket=ticket,
                         symbol_info=symbol_info,
                         risk_engine=self.risk_engine
@@ -1914,6 +2026,7 @@ class TradingController(QObject):
                 self.state_manager.close_position(
                     exit_price=exit_price,
                     exit_reason=reason,
+                    exit_time=current_bar.get('time'),
                     ticket=ticket,
                     symbol_info=symbol_info,
                     risk_engine=self.risk_engine,

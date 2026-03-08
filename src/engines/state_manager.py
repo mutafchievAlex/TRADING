@@ -154,8 +154,7 @@ class StateManager:
             
             self.open_positions.append(new_position)
             
-            # Update last_trade_time to the more recent of open or close event
-            # This ensures cooldown tracks the latest trading activity
+            # Update last_trade_time on entry (cooldown is from last ENTRY, not exit)
             entry_time = new_position['entry_time']
             entry_datetime = entry_time if isinstance(entry_time, datetime) else datetime.fromisoformat(entry_time)
             if self.last_trade_time is None or entry_datetime > self.last_trade_time:
@@ -298,11 +297,8 @@ class StateManager:
                 # Remove closed position
                 self.open_positions.remove(position_to_close)
                 
-                # Update last_trade_time to exit time for cooldown calculation
-                # Cooldown should be from the LATEST event (open or close), whichever is more recent
-                exit_datetime = exit_time if isinstance(exit_time, datetime) else datetime.fromisoformat(exit_time)
-                if self.last_trade_time is None or exit_datetime > self.last_trade_time:
-                    self.last_trade_time = exit_time
+                # Note: last_trade_time is NOT updated on exit
+                # Cooldown tracks time since last ENTRY only
                 
                 self.save_state()
             

@@ -38,8 +38,11 @@ from threading import Lock, Thread, Event
 class SafeJSONEncoder(json.JSONEncoder):
     """JSON encoder that handles bool, numpy types, and datetime objects."""
     def default(self, obj: Any) -> Any:
-        # Handle numpy bool types
-        if isinstance(obj, (np.bool_, np.bool8)):
+        # Handle numpy bool types (bool8 removed in numpy 2.0+)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        # Check for bool8 attribute for numpy < 2.0 compatibility
+        if hasattr(np, 'bool8') and isinstance(obj, np.bool8):
             return bool(obj)
         # Handle numpy integer types
         elif isinstance(obj, (np.integer, np.int64, np.int32)):

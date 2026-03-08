@@ -62,6 +62,11 @@ class MainWindow(QMainWindow):
         # Status flags
         self.is_running = False
         self.is_connected = False
+        
+        # Setup periodic position refresh (every 500ms to ensure UI always shows all positions)
+        self._position_refresh_timer = QTimer()
+        self._position_refresh_timer.timeout.connect(self._refresh_positions_table)
+        self._position_refresh_timer.start(500)  # Refresh every 500ms
     
     def _setup_ui(self):
         """Set up the user interface layout."""
@@ -1552,6 +1557,7 @@ class MainWindow(QMainWindow):
         if positions and len(positions) > 0:
             # Update status
             pos_count = len(positions)
+            self.logger.debug(f"📊 UPDATE POSITIONS: {pos_count} position(s) to display")
             self.lbl_position_status.setText(f"{pos_count} open position{'s' if pos_count > 1 else ''}")
             self.lbl_position_status.setStyleSheet("color: green; font-weight: bold;")
             
@@ -1561,6 +1567,8 @@ class MainWindow(QMainWindow):
             for position in positions:
                 row = self.table_positions.rowCount()
                 self.table_positions.insertRow(row)
+                ticket = position.get('ticket', '-')
+                self.logger.debug(f"  → Adding position ticket={ticket}")
                 
                 # Ticket
                 ticket_item = QTableWidgetItem(str(position.get('ticket', '-')))
